@@ -1,0 +1,1297 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CCTNS 2.0</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  :root{
+    --purple-900:#341c5e; --purple-800:#432a72; --purple-700:#5a3a92; --purple-600:#6d47ab;
+    --purple-100:#efeafb; --purple-050:#f6f3fd; --lavender:#e3d9f7;
+    --pink:#c22a72; --pink-100:#fbe6f0; --blue:#2f8fd1; --blue-100:#e3f2fb;
+    --orange:#e98a4e; --orange-100:#fdece0; --green:#3fa66b; --red:#d1495b;
+    --ink:#241a38; --muted:#786f92; --line:#e4defa; --bg:#f3f0fb; --card:#ffffff;
+    --radius:10px; --shadow:0 1px 2px rgba(52,28,94,.06), 0 4px 14px rgba(52,28,94,.06);
+    font-family:'Noto Sans Devanagari','Inter',sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);font-size:14px;}
+  button{font-family:inherit;cursor:pointer;}
+  input,select,textarea{font-family:inherit;}
+  a{text-decoration:none;color:inherit;}
+
+  .topbar{height:60px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 18px;position:sticky;top:0;z-index:50;}
+  .brand{display:flex;align-items:center;gap:10px;}
+  .emblem{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--purple-700),var(--purple-900));display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:13px;flex:none;}
+  .brand-text .name{font-weight:700;font-size:17px;letter-spacing:.3px;color:var(--purple-900);line-height:1.1;}
+  .brand-text .tag{font-size:10.5px;color:var(--muted);}
+  .top-right{display:flex;align-items:center;gap:14px;}
+  .top-icon{width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--purple-700);background:var(--purple-050);border:1px solid var(--line);position:relative;}
+  .top-icon svg{width:17px;height:17px;}
+  .dot-badge{position:absolute;top:-3px;right:-3px;width:8px;height:8px;border-radius:50%;background:var(--red);border:2px solid #fff;}
+  .login-time{font-size:11.5px;color:var(--muted);white-space:nowrap;}
+  .pill-select{border:1px solid var(--line);background:var(--purple-050);border-radius:8px;padding:6px 10px;font-size:12.5px;color:var(--purple-900);}
+  .avatar{width:32px;height:32px;border-radius:50%;background:var(--lavender);display:flex;align-items:center;justify-content:center;color:var(--purple-700);font-weight:700;font-size:12px;}
+  .lang-toggle{display:flex;border:1px solid var(--purple-700);border-radius:8px;overflow:hidden;}
+  .lang-toggle button{border:none;background:#fff;color:var(--purple-700);font-size:12px;font-weight:700;padding:6px 12px;}
+  .lang-toggle button.active{background:var(--purple-700);color:#fff;}
+
+  .shell{display:flex;min-height:calc(100vh - 60px);}
+  .sidebar{width:230px;flex:none;background:linear-gradient(180deg,var(--purple-900),var(--purple-800) 60%,var(--purple-700));color:#e9e2fb;padding:14px 0;position:sticky;top:60px;height:calc(100vh - 60px);overflow-y:auto;}
+  .side-search{margin:0 14px 12px;position:relative;}
+  .side-search input{width:100%;padding:8px 10px 8px 30px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;font-size:12.5px;}
+  .side-search input::placeholder{color:#c9bdec;}
+  .side-search svg{position:absolute;left:9px;top:9px;width:14px;height:14px;color:#c9bdec;}
+  .nav-item{display:flex;align-items:center;gap:10px;padding:11px 16px;font-size:13.3px;color:#d9cff2;cursor:pointer;border-left:3px solid transparent;}
+  .nav-item svg{width:16px;height:16px;flex:none;}
+  .nav-item:hover{background:rgba(255,255,255,.06);}
+  .nav-item.active{background:rgba(255,255,255,.13);color:#fff;border-left-color:#f2b84b;font-weight:600;}
+  .nav-item .chev{margin-left:auto;width:12px;height:12px;transition:transform .15s;}
+  .nav-item.open .chev{transform:rotate(90deg);}
+  .submenu{overflow:hidden;max-height:0;transition:max-height .18s ease;}
+  .submenu.open{max-height:260px;}
+  .submenu a{display:block;padding:8px 16px 8px 42px;font-size:12.5px;color:#c8bced;}
+  .submenu a:hover{color:#fff;}
+  .submenu a.active{color:#fff;font-weight:600;}
+
+  .main{flex:1;padding:20px 22px 40px;min-width:0;}
+  .page{display:none;}
+  .page.active{display:block;}
+  .page-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;}
+  .page-head h1{font-size:18px;margin:0;color:var(--purple-900);}
+  .page-head .crumb{font-size:12px;color:var(--muted);}
+
+  .card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);border:1px solid var(--line);padding:16px;}
+  .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px;}
+  .stat{border-radius:var(--radius);padding:16px;position:relative;overflow:hidden;border:1px solid var(--line);}
+  .stat h3{margin:0 0 6px;font-size:12.5px;color:var(--muted);font-weight:600;}
+  .stat .num{font-size:28px;font-weight:700;color:var(--ink);}
+  .stat .link{display:inline-flex;align-items:center;gap:4px;margin-top:10px;font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:20px;background:rgba(255,255,255,.6);}
+  .stat.c1{background:var(--lavender);} .stat.c1 .link{color:var(--purple-700);}
+  .stat.c2{background:#ded3f7;} .stat.c2 .link{color:var(--purple-700);}
+  .stat.c3{background:var(--pink-100);} .stat.c3 .link{color:var(--pink);}
+  .stat.c4{background:var(--orange-100);} .stat.c4 .link{color:var(--orange);}
+
+  .quicklinks{display:flex;gap:10px;overflow-x:auto;padding:14px;margin-bottom:16px;}
+  .qbtn{flex:none;display:flex;align-items:center;gap:8px;padding:10px 16px;border-radius:9px;border:1px solid var(--line);background:var(--purple-050);color:var(--purple-800);font-size:12.8px;font-weight:600;white-space:nowrap;}
+  .qbtn.primary{background:var(--purple-700);color:#fff;border-color:var(--purple-700);}
+  .qbtn svg{width:15px;height:15px;}
+  .qbtn:hover{filter:brightness(0.97);}
+
+  .row2{display:grid;grid-template-columns:1.3fr 1fr;gap:14px;margin-bottom:16px;}
+  .card h2{margin:0 0 4px;font-size:14.5px;color:var(--ink);}
+  .radiorow{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-bottom:8px;}
+  .radiorow label{display:flex;align-items:center;gap:5px;cursor:pointer;}
+  .donuts{display:flex;justify-content:space-around;gap:10px;}
+  .donut-block{text-align:center;}
+  .donut-block canvas{max-width:130px;max-height:130px;}
+  .donut-block .lbl{font-size:11.5px;color:var(--muted);margin-top:6px;}
+
+  .row2b{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  th{text-align:left;color:var(--muted);font-weight:600;padding:8px 8px;border-bottom:1px solid var(--line);font-size:11.5px;}
+  td{padding:9px 8px;border-bottom:1px solid var(--line);vertical-align:top;}
+  .badge{display:inline-block;padding:3px 9px;border-radius:20px;font-size:10.8px;font-weight:600;}
+  .b-investigation{background:#e1f4e9;color:var(--green);}
+  .b-evidence{background:#fdeedd;color:#b5701e;}
+  .b-search{background:#fde3e6;color:var(--red);}
+  .b-forensic{background:var(--blue-100);color:var(--blue);}
+  .btn{border:1px solid var(--line);background:#fff;padding:6px 12px;border-radius:7px;font-size:12px;font-weight:600;color:var(--purple-700);}
+  .btn.solid{background:var(--purple-700);color:#fff;border-color:var(--purple-700);}
+  .btn.ghost{background:transparent;}
+  .btn:hover{filter:brightness(0.97);}
+  .view-all{float:right;background:var(--purple-700);color:#fff;border:none;padding:5px 12px;border-radius:16px;font-size:11px;font-weight:600;}
+
+  .cal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+  .cal-head .month{font-weight:600;font-size:13px;color:var(--purple-900);}
+  .cal-nav{background:none;border:none;color:var(--purple-700);font-size:16px;padding:2px 6px;}
+  .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;text-align:center;font-size:11.5px;}
+  .cal-grid .dow{color:var(--muted);font-weight:600;padding:4px 0;}
+  .cal-grid .day{padding:7px 0;border-radius:6px;color:var(--ink);}
+  .cal-grid .day.today{background:var(--purple-700);color:#fff;font-weight:700;}
+  .cal-grid .day.blank{visibility:hidden;}
+
+  .form-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;}
+  .field{margin-bottom:14px;}
+  .field label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;}
+  .field input,.field select,.field textarea{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px;background:#fbfaff;color:var(--ink);}
+  .field textarea{resize:vertical;min-height:90px;}
+  .field .hint{font-size:10.5px;color:var(--muted);text-align:right;margin-top:3px;}
+  .toggle-row{display:flex;align-items:center;gap:10px;margin-bottom:16px;font-size:13px;color:var(--ink);}
+  .toggle{width:36px;height:20px;border-radius:20px;background:var(--line);position:relative;flex:none;transition:.15s;}
+  .toggle.on{background:var(--purple-700);}
+  .toggle::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;background:#fff;border-radius:50%;transition:.15s;}
+  .toggle.on::after{left:18px;}
+  .form-actions{display:flex;justify-content:space-between;align-items:center;margin-top:6px;}
+  .upload-btn{display:inline-flex;align-items:center;gap:8px;background:var(--purple-700);color:#fff;border:none;padding:9px 16px;border-radius:8px;font-size:12.5px;font-weight:600;}
+  .file-hint{font-size:10.5px;color:var(--muted);margin-top:6px;}
+
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:16px;}
+  .tab{padding:10px 16px;font-size:13px;font-weight:600;color:var(--muted);border-bottom:2px solid transparent;cursor:pointer;}
+  .tab.active{color:var(--purple-700);border-bottom-color:var(--purple-700);}
+
+  .modcards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+  .modcard{background:#fff;border:1px solid var(--line);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);}
+  .modcard h3{margin:0 0 6px;font-size:14px;color:var(--purple-900);}
+  .modcard p{margin:0 0 10px;font-size:12.3px;color:var(--muted);line-height:1.5;}
+  .modcard ul{margin:0 0 12px;padding-left:16px;font-size:12px;color:var(--ink);}
+  .modcard ul li{margin-bottom:3px;}
+
+  .toast{position:fixed;bottom:24px;right:24px;background:var(--purple-900);color:#fff;padding:12px 18px;border-radius:8px;font-size:13px;box-shadow:0 6px 20px rgba(0,0,0,.2);display:flex;align-items:center;gap:8px;opacity:0;transform:translateY(10px);transition:.2s;pointer-events:none;z-index:200;}
+  .toast.show{opacity:1;transform:translateY(0);}
+
+  .stub{text-align:center;padding:60px 20px;color:var(--muted);}
+  .stub svg{width:46px;height:46px;color:var(--purple-600);margin-bottom:12px;}
+  .stub h3{color:var(--purple-900);margin:0 0 6px;font-size:15px;}
+
+  .stepper{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap;}
+  .step-pill{padding:7px 12px;border-radius:20px;font-size:11.5px;font-weight:600;background:var(--purple-050);color:var(--muted);border:1px solid var(--line);}
+  .step-pill.active{background:var(--purple-700);color:#fff;border-color:var(--purple-700);}
+  .step-pill.done{background:#e1f4e9;color:var(--green);border-color:#cdeedb;}
+  .step-panel{display:none;}
+  .step-panel.active{display:block;}
+  .map-box{height:150px;border:1.5px dashed var(--line);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px;background:var(--purple-050);}
+  .otp-row{display:flex;gap:8px;align-items:flex-end;}
+  .otp-row .field{flex:1;margin-bottom:0;}
+
+  @media (max-width:1000px){
+    .grid4{grid-template-columns:repeat(2,1fr);}
+    .row2,.row2b{grid-template-columns:1fr;}
+    .form-grid{grid-template-columns:1fr 1fr;}
+    .modcards{grid-template-columns:1fr 1fr;}
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">
+    <div class="emblem">CC</div>
+    <div class="brand-text">
+      <div class="name">CCTNS <span style="font-weight:400;font-size:12px;color:var(--muted)">2.0</span></div>
+      <div class="tag" data-i18n="tagline"></div>
+    </div>
+  </div>
+  <div class="top-right">
+    <div class="lang-toggle">
+      <button id="btnHi" onclick="setLang('hi')">हिन्दी</button>
+      <button id="btnEn" onclick="setLang('en')">English</button>
+    </div>
+    <span class="login-time" id="loginTime"></span>
+    <select class="pill-select" id="stationSelect"></select>
+    <select class="pill-select" id="roleSelect"></select>
+    <div class="top-icon" data-i18n-title="notifications">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg>
+      <span class="dot-badge"></span>
+    </div>
+    <div class="top-icon" data-i18n-title="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></div>
+    <div class="avatar">SI</div>
+  </div>
+</div>
+
+<div class="shell">
+  <div class="sidebar">
+    <div class="side-search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input data-i18n-ph="searchPh">
+    </div>
+
+    <div class="nav-item active" data-page="dashboard">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+      <span data-i18n="navDashboard"></span>
+    </div>
+
+    <div class="nav-item" data-toggle="gd">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h13a2 2 0 012 2v14l-4-3H4a2 2 0 01-2-2V6a2 2 0 012-2z"/><line x1="6" y1="8" x2="15" y2="8"/><line x1="6" y1="12" x2="13" y2="12"/></svg>
+      <span data-i18n="navGD"></span> <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M9 6l6 6-6 6"/></svg>
+    </div>
+    <div class="submenu" id="sub-gd">
+      <a data-page="gd-view" class="active" data-i18n="navGDView"></a>
+      <a data-page="gd-register" data-i18n="navGDRegister"></a>
+      <a data-page="gd-rollcall" data-i18n="navGDRollcall"></a>
+    </div>
+
+    <div class="nav-item" data-page="complaints">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 4h.01M10.3 3.9L2.5 17a2 2 0 001.7 3h15.6a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>
+      <span data-i18n="navComplaints"></span>
+    </div>
+
+    <div class="nav-item" data-page="citizen">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+      <span data-i18n="navCitizen"></span>
+    </div>
+
+    <div class="nav-item" data-toggle="reg">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 3v4h6V3"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/></svg>
+      <span data-i18n="navReg"></span> <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M9 6l6 6-6 6"/></svg>
+    </div>
+    <div class="submenu" id="sub-reg">
+      <a data-page="reg-hub" class="active" data-i18n="navRegHub"></a>
+      <a data-page="reg-fir" data-i18n="navRegFir"></a>
+      <a data-page="reg-ncr" data-i18n="navRegNcr"></a>
+      <a data-page="reg-mlc" data-i18n="navRegMlc"></a>
+      <a data-page="reg-missing" data-i18n="navRegMissing"></a>
+      <a data-page="reg-property" data-i18n="navRegProperty"></a>
+    </div>
+
+    <div class="nav-item" data-page="investigation">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <span data-i18n="navInvestigation"></span>
+    </div>
+    <div class="nav-item" data-page="establishment">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/></svg>
+      <span data-i18n="navEstablishment"></span>
+    </div>
+    <div class="nav-item" data-page="report">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="6"/><rect x="12" y="7" width="3" height="10"/><rect x="17" y="13" width="3" height="4"/></svg>
+      <span data-i18n="navReport"></span>
+    </div>
+    <div class="nav-item" data-page="casebasket">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7h-4V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2H4a1 1 0 00-1 1v10a2 2 0 002 2h14a2 2 0 002-2V8a1 1 0 00-1-1zM10 5h4v2h-4z"/></svg>
+      <span data-i18n="navCaseBasket"></span>
+    </div>
+  </div>
+
+  <div class="main">
+
+    <!-- DASHBOARD -->
+    <div class="page active" id="page-dashboard">
+      <div class="page-head"><h1 data-i18n="dashTitle"></h1><span class="crumb" data-i18n="crumbDash"></span></div>
+
+      <div class="grid4">
+        <div class="stat c1"><h3 data-i18n="statMissing"></h3><div class="num">3</div><a class="link" data-page="reg-missing" data-i18n="viewDetails"></a></div>
+        <div class="stat c2"><h3 data-i18n="statUidb"></h3><div class="num">1</div><a class="link" data-page="reg-missing" data-i18n="viewDetails"></a></div>
+        <div class="stat c3"><h3 data-i18n="statUifp"></h3><div class="num">0</div><a class="link" data-page="reg-property" data-i18n="viewDetails"></a></div>
+        <div class="stat c4"><h3 data-i18n="statPreventive"></h3><div class="num">6</div><a class="link" data-page="report" data-i18n="viewDetails"></a></div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px;">
+        <h2 data-i18n="quickLinkTitle" style="margin-bottom:10px;"></h2>
+        <div class="quicklinks" style="padding:0;margin-bottom:0;">
+          <button class="qbtn primary" data-page="gd-view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h13a2 2 0 012 2v14l-4-3H4a2 2 0 01-2-2V6a2 2 0 012-2z"/></svg><span data-i18n="qGD"></span></button>
+          <button class="qbtn" data-page="reg-fir"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg><span data-i18n="qFIR"></span></button>
+          <button class="qbtn" data-page="reg-fir"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg><span data-i18n="qCaseDiary"></span></button>
+          <button class="qbtn" data-page="reg-missing"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0116 0v1"/></svg><span data-i18n="qMissing"></span></button>
+          <button class="qbtn" data-page="reg-fir"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 11l2 2-8.5 8.5-3-3L17 11z"/><path d="M15 6l3 3"/></svg><span data-i18n="qArrest"></span></button>
+          <button class="qbtn" data-page="reg-property"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><span data-i18n="qSeizure"></span></button>
+          <button class="qbtn" data-page="reg-missing"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 012-2h4a2 2 0 012 2v2"/></svg><span data-i18n="qUID"></span></button>
+        </div>
+      </div>
+
+      <div class="row2">
+        <div class="card">
+          <h2 data-i18n="crimeTrendTitle"></h2>
+          <div class="radiorow" id="crimeFilter">
+            <label><input type="radio" name="ct" value="all" checked> <span data-i18n="fAll"></span></label>
+            <label><input type="radio" name="ct" value="heinous"> <span data-i18n="fHeinous"></span></label>
+            <label><input type="radio" name="ct" value="nonheinous"> <span data-i18n="fNonHeinous"></span></label>
+          </div>
+          <canvas id="crimeTrendChart" height="180"></canvas>
+        </div>
+        <div class="card">
+          <h2 data-i18n="crimeWCTitle"></h2>
+          <div class="donuts">
+            <div class="donut-block"><canvas id="donutWomen"></canvas><div class="lbl" data-i18n="donutWomenLbl"></div></div>
+            <div class="donut-block"><canvas id="donutChildren"></canvas><div class="lbl" data-i18n="donutChildrenLbl"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row2b">
+        <div class="card">
+          <button class="view-all" data-page="reg-fir" data-i18n="viewAll"></button>
+          <h2 data-i18n="pendingTasksTitle"></h2>
+          <table>
+            <thead><tr><th data-i18n="thTaskName"></th><th data-i18n="thRegDate"></th><th data-i18n="thComplaintNo"></th><th data-i18n="thStatus"></th></tr></thead>
+            <tbody id="pendingTasksBody"></tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h2 data-i18n="dailyStatusTitle" style="margin-bottom:12px;"></h2>
+          <div class="cal-head">
+            <button class="cal-nav" id="calPrev">←</button>
+            <span class="month" id="calMonthLabel"></span>
+            <button class="cal-nav" id="calNext">→</button>
+          </div>
+          <div class="cal-grid" id="calGrid"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- GENERAL DIARY: VIEW -->
+    <div class="page" id="page-gd-view">
+      <div class="page-head"><h1 data-i18n="navGDView"></h1><span class="crumb" data-i18n="crumbGDView"></span></div>
+      <div class="card" style="margin-bottom:14px;">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+          <div class="field" style="flex:1;min-width:180px;margin-bottom:0;"><label data-i18n="gdTypeLabel"></label>
+            <select id="gdFilterType"></select>
+          </div>
+          <div class="field" style="flex:1;min-width:180px;margin-bottom:0;"><label data-i18n="dateLabel"></label><input type="date" id="gdFilterDate"></div>
+          <div class="field" style="flex:2;min-width:220px;margin-bottom:0;"><label data-i18n="gdSearchLabel"></label><input data-i18n-ph="gdSearchPh" id="gdFilterText"></div>
+          <button class="btn solid" style="height:38px;" onclick="renderGDList()" data-i18n="btnSearch"></button>
+          <button class="qbtn primary" data-page="gd-register" data-i18n="btnNewEntry"></button>
+        </div>
+      </div>
+      <div class="card">
+        <table>
+          <thead><tr><th data-i18n="thGdNo"></th><th data-i18n="thType"></th><th data-i18n="thSubtype"></th><th data-i18n="thDateTime"></th><th data-i18n="thSubject"></th><th data-i18n="thTo"></th><th></th></tr></thead>
+          <tbody id="gdListBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- GENERAL DIARY: REGISTER -->
+    <div class="page" id="page-gd-register">
+      <div class="page-head"><h1 data-i18n="gdRegTitle"></h1><span class="crumb" data-i18n="crumbGDReg"></span></div>
+      <div class="card">
+        <div class="toggle-row">
+          <div class="toggle" id="multiToggle" onclick="this.classList.toggle('on')"></div>
+          <span data-i18n="multiEntry"></span>
+        </div>
+        <div class="form-grid">
+          <div class="field"><label data-i18n="gdTypeLabelReq"></label>
+            <select id="gdType" onchange="updateGDSubtypes()"></select>
+          </div>
+          <div class="field"><label data-i18n="gdSubtypeLabel"></label>
+            <select id="gdSubtype"></select>
+          </div>
+          <div class="field"><label data-i18n="gdToLabel"></label>
+            <select id="gdTo"></select>
+          </div>
+          <div class="field"><label data-i18n="gdDateLabel"></label><input type="datetime-local" id="gdDateTime"></div>
+          <div class="field"><label data-i18n="gdDelayLabel"></label><input data-i18n-ph="gdDelayPh" id="gdDelay"></div>
+          <div class="field"><label data-i18n="gdSubjectLabel"></label><input data-i18n-ph="gdSubjectPh" id="gdSubject" maxlength="100" oninput="charCount(this,'subCount',100)">
+            <div class="hint"><span id="subCount">0</span> / 100 <span data-i18n="chars"></span></div>
+          </div>
+        </div>
+        <div class="field">
+          <label data-i18n="gdBodyLabel"></label>
+          <textarea id="gdBody" data-i18n-ph="gdBodyPh" maxlength="1000" oninput="charCount(this,'bodyCount',1000)"></textarea>
+          <div class="hint"><span id="bodyCount">0</span> / 1000 <span data-i18n="chars"></span></div>
+        </div>
+        <button class="upload-btn"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg><span data-i18n="uploadFile"></span></button>
+        <div class="file-hint" data-i18n="fileHint"></div>
+        <div class="form-actions">
+          <span style="font-size:11px;color:var(--muted);" data-i18n="autoSave"></span>
+          <div style="display:flex;gap:10px;">
+            <button class="btn" onclick="resetGDForm()" data-i18n="btnReset"></button>
+            <button class="btn solid" onclick="submitGD()" data-i18n="btnSubmit"></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ROLL CALL -->
+    <div class="page" id="page-gd-rollcall">
+      <div class="page-head"><h1 data-i18n="navGDRollcall"></h1><span class="crumb" data-i18n="crumbRollcall"></span></div>
+      <div class="card" style="margin-bottom:14px;">
+        <p style="font-size:12.5px;color:var(--muted);margin-top:0;" data-i18n="rollcallDesc"></p>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;">
+          <div class="field" style="min-width:200px;margin-bottom:0;"><label data-i18n="dateLabel"></label><input type="date" value="2026-09-12"></div>
+          <div class="field" style="min-width:200px;margin-bottom:0;"><label data-i18n="timeLabel"></label><input type="time" value="18:05"></div>
+          <div class="field" style="min-width:220px;margin-bottom:0;"><label data-i18n="delayReasonLabel"></label><input data-i18n-ph="gdDelayPh"></div>
+        </div>
+      </div>
+      <div class="grid4" style="grid-template-columns:repeat(3,1fr);">
+        <div class="stat c1"><h3 data-i18n="rankInspector"></h3><div class="num">2 / 2</div></div>
+        <div class="stat c2"><h3 data-i18n="rankSI"></h3><div class="num">6 / 7</div></div>
+        <div class="stat c3"><h3 data-i18n="rankConstable"></h3><div class="num">21 / 24</div></div>
+      </div>
+      <div class="card">
+        <table>
+          <thead><tr><th data-i18n="thName"></th><th data-i18n="thRank"></th><th data-i18n="thStatus"></th></tr></thead>
+          <tbody id="rollcallBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- COMPLAINTS -->
+    <div class="page" id="page-complaints">
+      <div class="page-head"><h1 data-i18n="navComplaints"></h1><span class="crumb" data-i18n="crumbComplaints"></span></div>
+      <div class="card" style="margin-bottom:14px;">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:space-between;align-items:center;">
+          <input data-i18n-ph="complaintSearchPh" style="flex:1;min-width:220px;padding:9px 10px;border:1px solid var(--line);border-radius:7px;">
+          <div style="display:flex;gap:8px;">
+            <button class="btn" data-i18n="btnMerge"></button>
+            <button class="btn solid" onclick="toggleComplaintForm()" data-i18n="btnNewComplaint"></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" id="complaintForm" style="display:none;margin-bottom:14px;">
+        <h2 data-i18n="newComplaintTitle"></h2>
+        <div class="form-grid">
+          <div class="field"><label data-i18n="complainantName"></label><input data-i18n-ph="namePh" id="compName"></div>
+          <div class="field"><label data-i18n="mobile"></label><input data-i18n-ph="mobilePh" id="compMobile"></div>
+          <div class="field"><label data-i18n="subject"></label><input data-i18n-ph="subjectPh2" id="compSub"></div>
+        </div>
+        <div class="field"><label data-i18n="description"></label><textarea data-i18n-ph="descriptionPh" id="compDesc"></textarea></div>
+        <div class="form-actions">
+          <span style="font-size:11px;color:var(--muted);" data-i18n="draftSaved"></span>
+          <div style="display:flex;gap:10px;">
+            <button class="btn" onclick="toggleComplaintForm()" data-i18n="btnCancel"></button>
+            <button class="btn solid" onclick="submitComplaint()" data-i18n="btnSubmit"></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <table>
+          <thead><tr><th data-i18n="thComplaintNo2"></th><th data-i18n="thRegDate"></th><th data-i18n="thComplainant"></th><th data-i18n="thSubject"></th><th data-i18n="thIO"></th><th data-i18n="thStatus"></th><th data-i18n="thAction"></th></tr></thead>
+          <tbody id="complaintsBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- CITIZEN SERVICES -->
+    <div class="page" id="page-citizen">
+      <div class="page-head"><h1 data-i18n="navCitizen"></h1><span class="crumb" data-i18n="crumbCitizen"></span></div>
+      <div class="modcards">
+        <div class="modcard">
+          <h3 data-i18n="citCard1Title"></h3>
+          <p data-i18n="citCard1Desc"></p>
+          <ul><li data-i18n="citCard1B1"></li><li data-i18n="citCard1B2"></li></ul>
+          <button class="btn solid" data-i18n="btnView"></button>
+        </div>
+        <div class="modcard">
+          <h3 data-i18n="citCard2Title"></h3>
+          <p data-i18n="citCard2Desc"></p>
+          <ul><li data-i18n="citCard2B1"></li><li data-i18n="citCard2B2"></li></ul>
+          <button class="btn solid" data-i18n="btnView"></button>
+        </div>
+        <div class="modcard">
+          <h3 data-i18n="citCard3Title"></h3>
+          <p data-i18n="citCard3Desc"></p>
+          <ul><li data-i18n="citCard3B1"></li><li data-i18n="citCard3B2"></li></ul>
+          <button class="btn solid" data-i18n="btnView"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- REGISTRATION HUB -->
+    <div class="page" id="page-reg-hub">
+      <div class="page-head"><h1 data-i18n="navReg"></h1><span class="crumb" data-i18n="crumbReg"></span></div>
+      <div class="modcards">
+        <div class="modcard">
+          <h3 data-i18n="regCard1Title"></h3><p data-i18n="regCard1Desc"></p>
+          <ul><li data-i18n="regCard1B1"></li><li data-i18n="regCard1B2"></li><li data-i18n="regCard1B3"></li></ul>
+          <button class="btn solid" data-page="reg-fir" data-i18n="btnNewReg"></button>
+        </div>
+        <div class="modcard">
+          <h3 data-i18n="regCard2Title"></h3><p data-i18n="regCard2Desc"></p>
+          <ul><li data-i18n="regCard2B1"></li><li data-i18n="regCard2B2"></li><li data-i18n="regCard2B3"></li></ul>
+          <button class="btn solid" data-page="reg-ncr" data-i18n="btnNewReg"></button>
+        </div>
+        <div class="modcard">
+          <h3 data-i18n="regCard3Title"></h3><p data-i18n="regCard3Desc"></p>
+          <ul><li data-i18n="regCard3B1"></li><li data-i18n="regCard3B2"></li><li data-i18n="regCard3B3"></li></ul>
+          <button class="btn solid" data-page="reg-mlc" data-i18n="btnNewReg"></button>
+        </div>
+        <div class="modcard">
+          <h3 data-i18n="regCard4Title"></h3><p data-i18n="regCard4Desc"></p>
+          <ul><li data-i18n="regCard4B1"></li><li data-i18n="regCard4B2"></li></ul>
+          <button class="btn solid" data-page="reg-missing" data-i18n="btnNewReg"></button>
+        </div>
+        <div class="modcard">
+          <h3 data-i18n="regCard5Title"></h3><p data-i18n="regCard5Desc"></p>
+          <ul><li data-i18n="regCard5B1"></li><li data-i18n="regCard5B2"></li></ul>
+          <button class="btn solid" data-page="reg-property" data-i18n="btnNewReg"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- FIR WIZARD -->
+    <div class="page" id="page-reg-fir">
+      <div class="page-head"><h1 data-i18n="firTitle"></h1><span class="crumb" data-i18n="crumbFir"></span></div>
+      <div class="card">
+        <div class="stepper" id="firStepper"></div>
+
+        <div class="step-panel active" data-step="0">
+          <div class="form-grid">
+            <div class="field"><label data-i18n="firTypeLabel"></label><select id="firTypeSel"></select></div>
+            <div class="field"><label data-i18n="firFilterLabel"></label><select id="firFilterSel"></select></div>
+            <div class="field"><label data-i18n="firStationLabel"></label><input value="Central Police Station" id="firStationInput" disabled></div>
+          </div>
+        </div>
+
+        <div class="step-panel" data-step="1">
+          <p style="font-size:12.5px;color:var(--muted);" data-i18n="firGdDesc"></p>
+          <div class="field" style="max-width:320px;"><label data-i18n="firGdLabel"></label><select id="firGdSel"></select></div>
+        </div>
+
+        <div class="step-panel" data-step="2">
+          <div class="form-grid">
+            <div class="field"><label data-i18n="firBnsLabel"></label><input data-i18n-ph="firBnsPh"></div>
+            <div class="field"><label data-i18n="firHeadLabel"></label><select id="firHeadSel"></select></div>
+            <div class="field"><label data-i18n="firTagLabel"></label><select id="firTagSel"></select></div>
+          </div>
+        </div>
+
+        <div class="step-panel" data-step="3">
+          <div class="form-grid">
+            <div class="field"><label data-i18n="firIncidentDt"></label><input type="datetime-local"></div>
+            <div class="field"><label data-i18n="firBeat"></label><input data-i18n-ph="firBeatPh"></div>
+            <div class="field"><label data-i18n="firLocCat"></label><select id="firLocSel"></select></div>
+          </div>
+          <div class="map-box" data-i18n="firMapBox"></div>
+        </div>
+
+        <div class="step-panel" data-step="4">
+          <div class="form-grid">
+            <div class="field"><label data-i18n="firComplainantName"></label><input data-i18n-ph="firComplainantPh"></div>
+            <div class="field"><label data-i18n="mobile"></label><input data-i18n-ph="mobilePh"></div>
+            <div class="field"><label data-i18n="firAddrType"></label><select id="firAddrSel"></select></div>
+          </div>
+          <div class="otp-row">
+            <div class="field"><label data-i18n="firOtpLabel"></label><input data-i18n-ph="firOtpPh"></div>
+            <button class="btn solid" onclick="sendOtp()" data-i18n="btnSendOtp"></button>
+          </div>
+          <div id="otpMsg" style="font-size:11.5px;color:var(--green);margin-top:8px;display:none;" data-i18n="otpSent"></div>
+        </div>
+
+        <div class="step-panel" data-step="5">
+          <div class="form-grid">
+            <div class="field"><label data-i18n="firAccusedName"></label><input data-i18n-ph="firAccusedPh"></div>
+            <div class="field"><label data-i18n="firAccusedMobile"></label><input data-i18n-ph="firAccusedMobilePh"></div>
+            <div class="field"><label data-i18n="firVideoFlag"></label><select id="firVideoSel"></select></div>
+          </div>
+          <div class="field"><label data-i18n="firDelayReason"></label><input data-i18n-ph="firDelayReasonPh"></div>
+        </div>
+
+        <div class="step-panel" data-step="6">
+          <div class="form-grid">
+            <div class="field"><label data-i18n="firZeroReReg"></label><select id="firZeroSel"></select></div>
+            <div class="field"><label data-i18n="firCrossCase"></label><input data-i18n-ph="firCrossCasePh"></div>
+            <div class="field"><label data-i18n="firCourtCopy"></label><select id="firCourtSel"></select></div>
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button class="btn" id="firPrev" onclick="firNav(-1)" data-i18n="btnBack"></button>
+          <div style="display:flex;gap:10px;">
+            <button class="btn" data-i18n="btnSaveDraft"></button>
+            <button class="btn solid" id="firNext" onclick="firNav(1)"></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SUB-MODULE FORMS -->
+    <div class="page" id="page-reg-ncr">
+      <div class="page-head"><h1 data-i18n="ncrTitle"></h1><span class="crumb" data-i18n="crumbNcr"></span></div>
+      <div class="card">
+        <div class="form-grid">
+          <div class="field"><label data-i18n="complainantName"></label><input></div>
+          <div class="field"><label data-i18n="ncrMobileOtp"></label><input></div>
+          <div class="field"><label data-i18n="ncrIO"></label><select id="ncrIoSel"></select></div>
+        </div>
+        <div class="field"><label data-i18n="ncrMagistrate"></label><textarea data-i18n-ph="ncrMagistratePh"></textarea></div>
+        <div class="form-actions"><span></span><button class="btn solid" data-i18n="btnSubmit"></button></div>
+      </div>
+    </div>
+
+    <div class="page" id="page-reg-mlc">
+      <div class="page-head"><h1 data-i18n="mlcTitle"></h1><span class="crumb" data-i18n="crumbMlc"></span></div>
+      <div class="card">
+        <div class="form-grid">
+          <div class="field"><label data-i18n="mlcIncidentType"></label><select id="mlcIncSel"></select></div>
+          <div class="field"><label data-i18n="mlcTransport"></label><select id="mlcTransSel"></select></div>
+          <div class="field"><label data-i18n="mlcGdLink"></label><select id="mlcGdSel"></select></div>
+        </div>
+        <div class="field"><label data-i18n="mlcInjuryList"></label><textarea data-i18n-ph="mlcInjuryPh"></textarea></div>
+        <div class="form-actions"><span></span><button class="btn solid" data-i18n="btnSubmit"></button></div>
+      </div>
+    </div>
+
+    <div class="page" id="page-reg-missing">
+      <div class="page-head"><h1 data-i18n="missingTitle"></h1><span class="crumb" data-i18n="crumbMissing"></span></div>
+      <div class="tabs">
+        <div class="tab active" data-i18n="missingTab1"></div>
+        <div class="tab" data-i18n="missingTab2"></div>
+        <div class="tab" data-i18n="missingTab3"></div>
+      </div>
+      <div class="card">
+        <div class="form-grid">
+          <div class="field"><label data-i18n="missingNameAge"></label><input></div>
+          <div class="field"><label data-i18n="missingLastSeen"></label><input></div>
+          <div class="field"><label data-i18n="missingPmAttach"></label><input type="file" disabled></div>
+        </div>
+        <div class="field"><label data-i18n="description"></label><textarea data-i18n-ph="missingDescPh"></textarea></div>
+        <div class="form-actions"><span style="font-size:11px;color:var(--muted)" data-i18n="missingScNote"></span><button class="btn solid" data-i18n="btnSubmit"></button></div>
+      </div>
+    </div>
+
+    <div class="page" id="page-reg-property">
+      <div class="page-head"><h1 data-i18n="propertyTitle"></h1><span class="crumb" data-i18n="crumbProperty"></span></div>
+      <div class="card">
+        <div class="form-grid">
+          <div class="field"><label data-i18n="propertyType"></label><select id="propTypeSel"></select></div>
+          <div class="field"><label data-i18n="propertyLocation"></label><input></div>
+          <div class="field"><label data-i18n="propertyValue"></label><input placeholder="₹"></div>
+        </div>
+        <div class="field"><label data-i18n="description"></label><textarea></textarea></div>
+        <div class="form-actions"><span></span><button class="btn solid" data-i18n="btnSubmit"></button></div>
+      </div>
+    </div>
+
+    <!-- STUB PAGES -->
+    <div class="page" id="page-investigation"><div class="page-head"><h1 data-i18n="navInvestigation"></h1></div><div class="card"><div class="stub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><h3 data-i18n="stubTitle"></h3><p data-i18n="stubDesc"></p></div></div></div>
+    <div class="page" id="page-establishment"><div class="page-head"><h1 data-i18n="navEstablishment"></h1></div><div class="card"><div class="stub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 21h18M5 21V7l7-4 7 4v14"/></svg><h3 data-i18n="stubTitle"></h3><p data-i18n="stubDesc"></p></div></div></div>
+    <div class="page" id="page-report"><div class="page-head"><h1 data-i18n="navReport"></h1></div><div class="card"><div class="stub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3v18h18"/></svg><h3 data-i18n="stubTitle"></h3><p data-i18n="stubDesc"></p></div></div></div>
+    <div class="page" id="page-casebasket"><div class="page-head"><h1 data-i18n="caseBasketTitle"></h1></div><div class="card"><div class="stub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20 7h-4V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2H4a1 1 0 00-1 1v10a2 2 0 002 2h14a2 2 0 002-2V8a1 1 0 00-1-1z"/></svg><h3 data-i18n="caseBasketStub"></h3><p data-i18n="caseBasketDesc"></p></div></div></div>
+
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// TRANSLATIONS
+const DICT = {
+  tagline:{hi:'अपराध एवं अपराधी ट्रैकिंग नेटवर्क एवं प्रणाली', en:'Crime & Criminal Tracking Network & Systems'},
+  notifications:{hi:'सूचनाएं', en:'Notifications'},
+  search:{hi:'खोजें', en:'Search'},
+  searchPh:{hi:'खोजें...', en:'Search...'},
+  navDashboard:{hi:'डैशबोर्ड', en:'Dashboard'},
+  navGD:{hi:'जनरल डायरी', en:'General Diary'},
+  navGDView:{hi:'जनरल डायरी खोजें और देखें', en:'Search & View General Diary'},
+  navGDRegister:{hi:'जनरल डायरी पंजीकरण', en:'Register General Diary'},
+  navGDRollcall:{hi:'हाजिरी गिनती (रोल कॉल)', en:'Roll Call'},
+  navComplaints:{hi:'शिकायत', en:'Complaints'},
+  navCitizen:{hi:'नागरिक सेवाएं', en:'Citizen Services'},
+  navReg:{hi:'पंजीकरण', en:'Registration'},
+  navRegHub:{hi:'पंजीकरण होम', en:'Registration Home'},
+  navRegFir:{hi:'FIR प्राथमिकी', en:'FIR'},
+  navRegNcr:{hi:'NCR', en:'NCR'},
+  navRegMlc:{hi:'मेडिको-लीगल', en:'Medico-Legal'},
+  navRegMissing:{hi:'गुमशुदा / अज्ञात शव', en:'Missing / UID'},
+  navRegProperty:{hi:'संपत्ति / अजनबी', en:'Property / Strangers'},
+  navInvestigation:{hi:'अनुसंधान', en:'Investigation'},
+  navEstablishment:{hi:'अधिष्ठान', en:'Establishment'},
+  navReport:{hi:'रिपोर्ट', en:'Report'},
+  navCaseBasket:{hi:'केस बास्केट', en:'Case Basket'},
+
+  dashTitle:{hi:'डैशबोर्ड', en:'Dashboard'},
+  crumbDash:{hi:'होम / डैशबोर्ड', en:'Home / Dashboard'},
+  statMissing:{hi:'Assigned Missing Person', en:'Assigned Missing Person'},
+  statUidb:{hi:'Assigned UIDB', en:'Assigned UIDB'},
+  statUifp:{hi:'Assigned UIFP', en:'Assigned UIFP'},
+  statPreventive:{hi:'Preventive Action', en:'Preventive Action'},
+  viewDetails:{hi:'विवरण देखें →', en:'View Details →'},
+  quickLinkTitle:{hi:'Quick Link', en:'Quick Link'},
+  qGD:{hi:'जनरल डायरी', en:'General Diary'},
+  qFIR:{hi:'नई FIR', en:'New FIR'},
+  qCaseDiary:{hi:'केस डायरी', en:'Case Diary'},
+  qMissing:{hi:'गुमशुदा व्यक्ति', en:'Missing Person'},
+  qArrest:{hi:'गिरफ्तारी', en:'Arrest'},
+  qSeizure:{hi:'जब्ती', en:'Seizure'},
+  qUID:{hi:'अज्ञात शव', en:'Unidentified Body'},
+  crimeTrendTitle:{hi:'Crime Trend', en:'Crime Trend'},
+  fAll:{hi:'All', en:'All'},
+  fHeinous:{hi:'Heinous', en:'Heinous'},
+  fNonHeinous:{hi:'Non-Heinous', en:'Non-Heinous'},
+  crimeWCTitle:{hi:'महिला व बाल अपराध', en:'Crime Against Women & Children'},
+  donutWomenLbl:{hi:'महिलाओं के विरुद्ध अपराध', en:'Crime Against Women'},
+  donutChildrenLbl:{hi:'बच्चों के विरुद्ध अपराध', en:'Crime Against Children'},
+  viewAll:{hi:'सभी देखें', en:'View All'},
+  pendingTasksTitle:{hi:'लंबित कार्य', en:'Pending Tasks'},
+  thTaskName:{hi:'कार्य का नाम', en:'Task Name'},
+  thRegDate:{hi:'पंजीकरण दिनांक', en:'Registration Date'},
+  thComplaintNo:{hi:'शिकायत सं.', en:'Complaint No.'},
+  thStatus:{hi:'स्थिति', en:'Status'},
+  dailyStatusTitle:{hi:'दैनिक स्थिति रिपोर्ट', en:'Daily Status Report'},
+
+  crumbGDView:{hi:'होम / जनरल डायरी / खोजें और देखें', en:'Home / General Diary / Search & View'},
+  gdTypeLabel:{hi:'जनरल डायरी प्रकार', en:'General Diary Type'},
+  gdTypeLabelReq:{hi:'जनरल डायरी प्रकार *', en:'General Diary Type *'},
+  dateLabel:{hi:'दिनांक', en:'Date'},
+  gdSearchLabel:{hi:'विषय / GD संख्या खोजें', en:'Search by Subject / GD No.'},
+  gdSearchPh:{hi:'खोजने के लिए टाइप करें...', en:'Type to search...'},
+  btnSearch:{hi:'खोजें', en:'Search'},
+  btnNewEntry:{hi:'+ नई प्रविष्टि', en:'+ New Entry'},
+  thGdNo:{hi:'GD संख्या', en:'GD No.'},
+  thType:{hi:'प्रकार', en:'Type'},
+  thSubtype:{hi:'उप-प्रकार', en:'Sub-type'},
+  thDateTime:{hi:'दिनांक / समय', en:'Date / Time'},
+  thSubject:{hi:'विषय', en:'Subject'},
+  thTo:{hi:'प्रति', en:'To'},
+
+  gdRegTitle:{hi:'रोज़नामचा का विवरण', en:'General Diary Details'},
+  crumbGDReg:{hi:'होम / जनरल डायरी / पंजीकरण', en:'Home / General Diary / Register'},
+  multiEntry:{hi:'एकाधिक जनरल डायरी प्रविष्टि', en:'Multiple General Diary Entry'},
+  gdSubtypeLabel:{hi:'जनरल डायरी उप प्रकार *', en:'General Diary Sub-type *'},
+  gdToLabel:{hi:'प्रति (अधिकारी के लिए) *', en:'To (Officer) *'},
+  gdDateLabel:{hi:'दर्ज तिथि', en:'Entry Date'},
+  gdDelayLabel:{hi:'देरी के लिए कारण', en:'Reason for Delay'},
+  gdDelayPh:{hi:'देरी के लिए कारण दर्ज करें', en:'Enter reason for delay'},
+  gdSubjectLabel:{hi:'विषय *', en:'Subject *'},
+  gdSubjectPh:{hi:'विषय दर्ज करें', en:'Enter subject'},
+  chars:{hi:'अक्षर', en:'characters'},
+  gdBodyLabel:{hi:'संक्षिप्त जनरल डायरी *', en:'Detailed General Diary *'},
+  gdBodyPh:{hi:'संक्षिप्त जनरल डायरी दर्ज करें', en:'Enter detailed general diary'},
+  uploadFile:{hi:'फ़ाइल अपलोड', en:'Upload File'},
+  fileHint:{hi:'समर्थित फ़ॉर्मेट: JPG, PNG, PDF (अधिकतम 5MB)', en:'Supported formats: JPG, PNG, PDF (max 5MB)'},
+  autoSave:{hi:'ड्राफ्ट स्वतः सुरक्षित हो रहा है...', en:'Draft is auto-saving...'},
+  btnReset:{hi:'रिसेट करें', en:'Reset'},
+  btnSubmit:{hi:'जमा करें', en:'Submit'},
+
+  crumbRollcall:{hi:'होम / जनरल डायरी / हाजिरी गिनती', en:'Home / General Diary / Roll Call'},
+  rollcallDesc:{hi:'प्रतिदिन शाम 6:00–6:05 बजे प्रशासनिक श्रेणी के अंतर्गत स्वतः निर्धारित। देरी होने पर कारण अनिवार्य है।', en:'Auto-scheduled daily around 6:00–6:05 PM under the Administrative category. A reason is mandatory if delayed.'},
+  timeLabel:{hi:'समय', en:'Time'},
+  delayReasonLabel:{hi:'देरी का कारण (यदि लागू हो)', en:'Reason for Delay (if applicable)'},
+  rankInspector:{hi:'निरीक्षक (Inspector)', en:'Inspector'},
+  rankSI:{hi:'उप-निरीक्षक (Sub-Inspector)', en:'Sub-Inspector'},
+  rankConstable:{hi:'आरक्षक (Constable)', en:'Constable'},
+  thName:{hi:'नाम', en:'Name'},
+  thRank:{hi:'पद', en:'Rank'},
+
+  crumbComplaints:{hi:'होम / शिकायत', en:'Home / Complaints'},
+  complaintSearchPh:{hi:'शिकायत संख्या / नाम से खोजें...', en:'Search by complaint no. / name...'},
+  btnMerge:{hi:'डुप्लिकेट मर्ज करें', en:'Merge Duplicates'},
+  btnNewComplaint:{hi:'+ नई शिकायत', en:'+ New Complaint'},
+  newComplaintTitle:{hi:'नई शिकायत दर्ज करें', en:'File a New Complaint'},
+  complainantName:{hi:'शिकायतकर्ता का नाम *', en:'Complainant Name *'},
+  namePh:{hi:'नाम दर्ज करें', en:'Enter name'},
+  mobile:{hi:'मोबाइल नंबर *', en:'Mobile Number *'},
+  mobilePh:{hi:'10 अंकों का मोबाइल नंबर', en:'10-digit mobile number'},
+  subject:{hi:'विषय *', en:'Subject *'},
+  subjectPh2:{hi:'शिकायत का विषय', en:'Subject of the complaint'},
+  description:{hi:'विवरण *', en:'Description *'},
+  descriptionPh:{hi:'शिकायत का विस्तृत विवरण दर्ज करें', en:'Enter detailed description of the complaint'},
+  draftSaved:{hi:'ड्राफ्ट स्वतः सुरक्षित है ✓', en:'Draft auto-saved ✓'},
+  btnCancel:{hi:'रद्द करें', en:'Cancel'},
+  thComplaintNo2:{hi:'शिकायत संख्या', en:'Complaint No.'},
+  thComplainant:{hi:'शिकायतकर्ता', en:'Complainant'},
+  thIO:{hi:'जांच अधिकारी', en:'Investigating Officer'},
+  thAction:{hi:'कार्रवाई', en:'Action'},
+  btnView:{hi:'देखें', en:'View'},
+  btnAssignIO:{hi:'IO असाइन', en:'Assign IO'},
+
+  crumbCitizen:{hi:'होम / नागरिक सेवाएं', en:'Home / Citizen Services'},
+  citCard1Title:{hi:'सार्वजनिक शिकायत एवं सुझाव', en:'Public Grievances & Suggestions'},
+  citCard1Desc:{hi:'नागरिकों की शिकायतों एवं सुझावों को दर्ज एवं ट्रैक करें।', en:'Register and track public grievances and suggestions.'},
+  citCard1B1:{hi:'लंबित शिकायतें: 4', en:'Pending: 4'},
+  citCard1B2:{hi:'हल की गईं: 12', en:'Resolved: 12'},
+  citCard2Title:{hi:'चरित्र प्रमाणपत्र सत्यापन', en:'Character Certificate Verification'},
+  citCard2Desc:{hi:'चरित्र प्रमाणपत्र हेतु प्राप्त अनुरोधों का सत्यापन करें।', en:'Verify requests received for character certificates.'},
+  citCard2B1:{hi:'लंबित सत्यापन: 7', en:'Pending Verification: 7'},
+  citCard2B2:{hi:'स्वीकृत: 19', en:'Approved: 19'},
+  citCard3Title:{hi:'शस्त्र लाइसेंस शिकायत', en:'Arms License Grievance'},
+  citCard3Desc:{hi:'शस्त्र लाइसेंस संबंधी शिकायतों का निवारण करें।', en:'Process grievances related to arms licenses.'},
+  citCard3B1:{hi:'लंबित: 2', en:'Pending: 2'},
+  citCard3B2:{hi:'निस्तारित: 5', en:'Resolved: 5'},
+
+  crumbReg:{hi:'होम / पंजीकरण', en:'Home / Registration'},
+  regCard1Title:{hi:'FIR — प्रथम सूचना रिपोर्ट', en:'FIR — First Information Report'},
+  regCard1Desc:{hi:'संज्ञेय अपराधों की प्राथमिकी दर्ज करना।', en:'Register FIRs for cognizable offences.'},
+  regCard1B1:{hi:'शिकायतकर्ता OTP सत्यापन', en:'Complainant OTP verification'},
+  regCard1B2:{hi:'BNS धारा खोज', en:'BNS section search'},
+  regCard1B3:{hi:'स्थान मानचित्र निर्देशांक', en:'Spatial map coordinates'},
+  regCard2Title:{hi:'NCR — गैर-संज्ञेय रिपोर्ट', en:'NCR — Non-Cognizable Report'},
+  regCard2Desc:{hi:'गैर-संज्ञेय अपराधों की रिपोर्ट दर्ज करना।', en:'Log non-cognizable offence reports.'},
+  regCard2B1:{hi:'जांच रिपोर्ट स्वीकृति', en:'Inquiry report approval'},
+  regCard2B2:{hi:'मजिस्ट्रेट आदेश लॉगिंग', en:'Magistrate order logging'},
+  regCard2B3:{hi:'IO पुनःनियुक्ति', en:'IO reassignment'},
+  regCard3Title:{hi:'मेडिको-लीगल केस (MLC)', en:'Medico-Legal Case (MLC)'},
+  regCard3Desc:{hi:'MLC पंजीकरण एवं ट्रैकिंग।', en:'MLC registration and tracking.'},
+  regCard3B1:{hi:'चोट सूची', en:'Injury checklists'},
+  regCard3B2:{hi:'परिवहन साधन लॉगिंग', en:'Transport mode logging'},
+  regCard3B3:{hi:'प्रत्यक्ष GD लिंक', en:'Direct GD link'},
+  regCard4Title:{hi:'गुमशुदा व्यक्ति / अज्ञात शव', en:'Missing Person / UID'},
+  regCard4Desc:{hi:'गुमशुदा व्यक्ति एवं अज्ञात शवों का पंजीकरण।', en:'Registration of missing persons and unidentified bodies.'},
+  regCard4B1:{hi:'सर्वोच्च न्यायालय अनुपालन', en:'Supreme Court mandate compliance'},
+  regCard4B2:{hi:'पोस्ट-मार्टम संलग्नक', en:'Post-mortem attachment support'},
+  regCard5Title:{hi:'संपत्ति एवं अजनबी', en:'Property & Strangers'},
+  regCard5Desc:{hi:'संपत्ति एवं पृष्ठभूमि सत्यापन।', en:'Property and background verification.'},
+  regCard5B1:{hi:'लावारिस संपत्ति सूचीकरण', en:'Unclaimed property cataloging'},
+  regCard5B2:{hi:'अजनबी रोल (IF-20)', en:'Stranger roll (IF-20) tracking'},
+  btnNewReg:{hi:'नया पंजीकरण करें', en:'New Registration'},
+
+  firTitle:{hi:'नई FIR पंजीकरण', en:'New FIR Registration'},
+  crumbFir:{hi:'होम / पंजीकरण / FIR', en:'Home / Registration / FIR'},
+  step1:{hi:'प्रकार व फ़िल्टर', en:'Type & Filters'},
+  step2:{hi:'GD एकीकरण', en:'GD Integration'},
+  step3:{hi:'धारा वर्गीकरण', en:'Statutory Sections'},
+  step4:{hi:'घटना व मानचित्र', en:'Incident & Map'},
+  step5:{hi:'शिकायतकर्ता', en:'Complainant'},
+  step6:{hi:'अभियुक्त विवरण', en:'Accused Details'},
+  step7:{hi:'प्रबंधन व न्यायालय', en:'Management & Court'},
+  firTypeLabel:{hi:'FIR प्रकार', en:'FIR Type'},
+  firTypeStd:{hi:'Standard FIR', en:'Standard FIR'},
+  firTypeZero:{hi:'Zero FIR', en:'Zero FIR'},
+  firTypeEdar:{hi:'e-DAR (दुर्घटना रिपोर्ट)', en:'e-DAR (Accident Report)'},
+  firFilterLabel:{hi:'त्वरित फ़िल्टर', en:'Quick Filter'},
+  filter7d:{hi:'पिछले 7 दिन', en:'Last 7 days'},
+  filter1m:{hi:'1 माह', en:'1 month'},
+  filter3m:{hi:'3 माह', en:'3 months'},
+  firStationLabel:{hi:'थाना', en:'Police Station'},
+  firGdDesc:{hi:'फॉर्म को छोड़े बिना सक्रिय जनरल डायरी बनाएं या लिंक करें।', en:'Create or link an active General Diary without leaving the form.'},
+  firGdLabel:{hi:'संबंधित GD', en:'Linked GD'},
+  firGdNew:{hi:'नई GD बनाएं', en:'Create New GD'},
+  firBnsLabel:{hi:'BNS धारा खोजें', en:'Search BNS Section'},
+  firBnsPh:{hi:'धारा संख्या या विवरण टाइप करें', en:'Type section number or description'},
+  firHeadLabel:{hi:'मुख्य / गौण शीर्ष', en:'Major / Minor Head'},
+  headMajor:{hi:'मुख्य', en:'Major'},
+  headMinor:{hi:'गौण', en:'Minor'},
+  firTagLabel:{hi:'विशेष टैग', en:'Special Tag'},
+  tagNone:{hi:'लागू नहीं', en:'Not Applicable'},
+  tagNE:{hi:'उत्तर-पूर्व', en:'North-East'},
+  tagKhalistani:{hi:'खालिस्तानी', en:'Khalistani'},
+  firIncidentDt:{hi:'घटना दिनांक/समय', en:'Incident Date/Time'},
+  firBeat:{hi:'बीट नंबर', en:'Beat Number'},
+  firBeatPh:{hi:'बीट संख्या', en:'Beat number'},
+  firLocCat:{hi:'स्थान श्रेणी', en:'Location Category'},
+  locPublic:{hi:'सार्वजनिक स्थान', en:'Public Place'},
+  locPrivate:{hi:'निजी परिसर', en:'Private Premises'},
+  firMapBox:{hi:'🗺 इंटरैक्टिव मानचित्र (GPS निर्देशांक चयन)', en:'🗺 Interactive Map (GPS coordinate selection)'},
+  firComplainantName:{hi:'शिकायतकर्ता का नाम', en:"Complainant's Name"},
+  firComplainantPh:{hi:'नाम दर्ज करें (स्वतः अंग्रेज़ी लिप्यंतरण)', en:'Enter name (auto English transliteration)'},
+  firAddrType:{hi:'पता प्रकार', en:'Address Type'},
+  addrPermanent:{hi:'स्थायी पता', en:'Permanent Address'},
+  addrCurrent:{hi:'वर्तमान पता', en:'Current Address'},
+  firOtpLabel:{hi:'OTP सत्यापन', en:'OTP Verification'},
+  firOtpPh:{hi:'OTP दर्ज करें', en:'Enter OTP'},
+  btnSendOtp:{hi:'OTP भेजें', en:'Send OTP'},
+  otpSent:{hi:'✓ OTP सफलतापूर्वक भेजा गया', en:'✓ OTP sent successfully'},
+  firAccusedName:{hi:'अभियुक्त का नाम', en:"Accused's Name"},
+  firAccusedPh:{hi:'डेटाबेस से चुनें या नया जोड़ें', en:'Select from database or add new'},
+  firAccusedMobile:{hi:'मोबाइल नंबर *', en:'Mobile Number *'},
+  firAccusedMobilePh:{hi:'अनिवार्य', en:'Mandatory'},
+  firVideoFlag:{hi:'वीडियो रिकॉर्डिंग फ्लैग', en:'Video Recording Flag'},
+  yes:{hi:'हाँ', en:'Yes'},
+  no:{hi:'नहीं', en:'No'},
+  firDelayReason:{hi:'पंजीकरण में देरी का कारण', en:'Reason for Delay in Registration'},
+  firDelayReasonPh:{hi:'यदि लागू हो', en:'If applicable'},
+  firZeroReReg:{hi:'Zero FIR पुनः-पंजीकरण', en:'Zero FIR Re-registration'},
+  zeroOtherJur:{hi:'हाँ, अन्य क्षेत्राधिकार से', en:'Yes, from another jurisdiction'},
+  firCrossCase:{hi:'क्रॉस-केस लिंक', en:'Cross-Case Link'},
+  firCrossCasePh:{hi:'संबंधित FIR संख्या', en:'Related FIR number'},
+  firCourtCopy:{hi:'न्यायालय प्रति भेजें', en:'Send Court Copy'},
+  btnBack:{hi:'पीछे', en:'Back'},
+  btnSaveDraft:{hi:'ड्राफ्ट सहेजें', en:'Save Draft'},
+  btnNext:{hi:'आगे', en:'Next'},
+
+  ncrTitle:{hi:'NCR — गैर-संज्ञेय रिपोर्ट', en:'NCR — Non-Cognizable Report'},
+  crumbNcr:{hi:'होम / पंजीकरण / NCR', en:'Home / Registration / NCR'},
+  ncrMobileOtp:{hi:'मोबाइल नंबर (OTP सत्यापन)', en:'Mobile Number (OTP Verification)'},
+  ncrIO:{hi:'जांच अधिकारी', en:'Investigating Officer'},
+  ncrIOAuto:{hi:'स्वतः असाइन', en:'Auto Assign'},
+  ncrIOManual:{hi:'मैन्युअल चयन', en:'Manual Selection'},
+  ncrMagistrate:{hi:'मजिस्ट्रेट आदेश विवरण', en:'Magistrate Order Details'},
+  ncrMagistratePh:{hi:'यदि उपलब्ध हो तो दर्ज करें', en:'Enter if available'},
+
+  mlcTitle:{hi:'मेडिको-लीगल केस (MLC)', en:'Medico-Legal Case (MLC)'},
+  crumbMlc:{hi:'होम / पंजीकरण / MLC', en:'Home / Registration / MLC'},
+  mlcIncidentType:{hi:'घटना प्रकार', en:'Incident Type'},
+  mlcAssault:{hi:'मारपीट', en:'Assault'},
+  mlcLiquor:{hi:'शराब संबंधी', en:'Liquor-related'},
+  mlcAccident:{hi:'दुर्घटना', en:'Accident'},
+  mlcTransport:{hi:'परिवहन साधन', en:'Transport Mode'},
+  mlcAmbulance:{hi:'108 एम्बुलेंस', en:'108 Ambulance'},
+  mlcNeighbor:{hi:'पड़ोसी / स्वयं', en:'Neighbor / Self'},
+  mlcPoliceVeh:{hi:'पुलिस वाहन', en:'Police Vehicle'},
+  mlcGdLink:{hi:'संबंधित GD', en:'Linked GD'},
+  mlcGdCreate:{hi:'प्रत्यक्ष लिंक बनाएं', en:'Create Direct Link'},
+  mlcInjuryList:{hi:'चोट सूची', en:'Injury Checklist'},
+  mlcInjuryPh:{hi:'चोटों का विवरण दर्ज करें', en:'Enter details of injuries'},
+
+  missingTitle:{hi:'गुमशुदा व्यक्ति / अज्ञात शव', en:'Missing Person / Unidentified Body'},
+  crumbMissing:{hi:'होम / पंजीकरण / गुमशुदा-अज्ञात शव', en:'Home / Registration / Missing-UID'},
+  missingTab1:{hi:'गुमशुदा (IF-1)', en:'Missing (IF-1)'},
+  missingTab2:{hi:'प्राप्त सूचना (IF-8)', en:'Found Notice (IF-8)'},
+  missingTab3:{hi:'अज्ञात शव (IF-10/11)', en:'Unidentified Body (IF-10/11)'},
+  missingNameAge:{hi:'नाम / अनुमानित आयु', en:'Name / Estimated Age'},
+  missingLastSeen:{hi:'अंतिम बार देखे जाने का स्थान', en:'Last Seen Location'},
+  missingPmAttach:{hi:'पोस्ट-मार्टम संलग्नक', en:'Post-Mortem Attachment'},
+  missingDescPh:{hi:'शारीरिक पहचान चिन्ह, कपड़े आदि', en:'Physical identification marks, clothing, etc.'},
+  missingScNote:{hi:'सर्वोच्च न्यायालय दिशा-निर्देश अनुपालन आवश्यक', en:'Supreme Court guideline compliance required'},
+
+  propertyTitle:{hi:'संपत्ति एवं अजनबी', en:'Property & Strangers'},
+  crumbProperty:{hi:'होम / पंजीकरण / संपत्ति-अजनबी', en:'Home / Registration / Property-Strangers'},
+  propertyType:{hi:'संपत्ति / व्यक्ति प्रकार', en:'Property / Person Type'},
+  propUnclaimed:{hi:'लावारिस संपत्ति', en:'Unclaimed Property'},
+  propStranger:{hi:'अजनबी रोल (IF-20)', en:'Stranger Roll (IF-20)'},
+  propUnknownPerson:{hi:'अज्ञात जीवित व्यक्ति (IF-9)', en:'Unidentified Living Person (IF-9)'},
+  propertyLocation:{hi:'बरामदगी स्थान', en:'Recovery Location'},
+  propertyValue:{hi:'अनुमानित मूल्य', en:'Estimated Value'},
+
+  stubTitle:{hi:'यह मॉड्यूल विकासाधीन है', en:'This module is under development'},
+  stubDesc:{hi:'Work in progress', en:'Work in progress'},
+  caseBasketTitle:{hi:'केस बास्केट (AI Case Basket)', en:'Case Basket (AI Case Basket)'},
+  caseBasketStub:{hi:'AI Case Basket — विकासाधीन', en:'AI Case Basket — Work in progress'},
+  caseBasketDesc:{hi:'यहां केवल बटन आवश्यक है; कार्यक्षमता निर्माणाधीन है।', en:'Only a button is needed here for now; functionality is under construction.'},
+
+  toastGD:{hi:'जनरल डायरी सफलतापूर्वक दर्ज की गई', en:'General Diary entry saved successfully'},
+  toastComplaint:{hi:'शिकायत सफलतापूर्वक दर्ज की गई', en:'Complaint filed successfully'},
+  toastFir:{hi:'FIR सफलतापूर्वक पंजीकृत की गई', en:'FIR registered successfully'},
+  noEntries:{hi:'कोई प्रविष्टि नहीं मिली', en:'No entries found'},
+
+  gdTypeInvestigation:{hi:'जांच', en:'Investigation'},
+  gdTypeAdmin:{hi:'प्रशासनिक', en:'Administrative'},
+  gdTypeDeparture:{hi:'प्रस्थान', en:'Departure'},
+  gdTypeArrival:{hi:'आगमन', en:'Arrival'},
+  gdTypeRegistration:{hi:'पंजीकरण', en:'Registration'},
+  gdTypeOthers:{hi:'अन्य', en:'Others'},
+  officerSHO:{hi:'थाना अध्यक्ष', en:'Station House Officer'},
+  officerIO:{hi:'विवेचक', en:'Investigating Officer'},
+  officerCO:{hi:'क्षेत्राधिकारी', en:'Circle Officer'},
+  officerSP:{hi:'पुलिस अधीक्षक', en:'Superintendent of Police'},
+
+  taskName:{hi:'सशस्त्र डकैती जांच - सेंट्रल बैंक', en:'Armed Robbery Investigation - Central Bank'},
+  statusInvestigation:{hi:'जांच', en:'Investigation'},
+  statusEvidence:{hi:'साक्ष्य समीक्षा', en:'Evidence Review'},
+  statusActiveSearch:{hi:'सक्रिय खोज', en:'Active Search'},
+  statusForensic:{hi:'फोरेंसिक विश्लेषण', en:'Forensic Analysis'},
+  statusPending:{hi:'लंबित जांच', en:'Pending Inquiry'},
+  statusApproved:{hi:'स्वीकृत', en:'Approved'},
+  statusRejected:{hi:'अस्वीकृत', en:'Rejected'},
+  statusPresent:{hi:'उपस्थित', en:'Present in Station'},
+  statusOutDuty:{hi:'ड्यूटी पर बाहर', en:'Out on Duty'},
+  statusAbsent:{hi:'अनुपस्थित', en:'Absent'},
+  statusSick:{hi:'बीमार', en:'Reported Sick'},
+};
+
+let currentLang = 'hi';
+
+function t(key){ return (DICT[key] && DICT[key][currentLang]) || key; }
+
+function applyStaticI18n(){
+  document.querySelectorAll('[data-i18n]').forEach(el=>{ el.textContent = t(el.getAttribute('data-i18n')); });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el=>{ el.placeholder = t(el.getAttribute('data-i18n-ph')); });
+  document.querySelectorAll('[data-i18n-title]').forEach(el=>{ el.title = t(el.getAttribute('data-i18n-title')); });
+}
+
+function setLang(lang){
+  currentLang = lang;
+  document.documentElement.lang = lang;
+  document.getElementById('btnHi').classList.toggle('active', lang==='hi');
+  document.getElementById('btnEn').classList.toggle('active', lang==='en');
+  applyStaticI18n();
+  populateSelects();
+  refreshCharts();
+  renderPendingTasks();
+  renderCalendar();
+  renderGDList();
+  renderComplaints();
+  renderRollcall();
+  renderStepper();
+}
+
+function opt(sel, key, value){ const o=document.createElement('option'); o.value=value||key; o.textContent=t(key); return o; }
+
+function populateSelects(){
+  const station = document.getElementById('stationSelect');
+  station.innerHTML = `<option>${currentLang==='hi'?'केंद्रीय थाना':'Central Police Station'}</option><option>${currentLang==='hi'?'सिटी कोतवाली':'City Kotwali'}</option>`;
+  const role = document.getElementById('roleSelect');
+  role.innerHTML = `<option>SHO</option><option>${currentLang==='hi'?'विवेचक':'Investigating Officer'}</option><option>${currentLang==='hi'?'कोर्ट परोकार':'Court Parokar'}</option>`;
+
+  const gdFilterType = document.getElementById('gdFilterType');
+  const prevVal = gdFilterType.value;
+  gdFilterType.innerHTML='';
+  gdFilterType.appendChild(opt(null, currentLang==='hi'?'सभी':'All','')); 
+  ['gdTypeInvestigation','gdTypeAdmin','gdTypeDeparture','gdTypeArrival','gdTypeRegistration','gdTypeOthers'].forEach(k=>gdFilterType.appendChild(opt(null,k)));
+
+  const gdType = document.getElementById('gdType');
+  gdType.innerHTML='';
+  ['gdTypeInvestigation','gdTypeAdmin','gdTypeDeparture','gdTypeArrival','gdTypeRegistration','gdTypeOthers'].forEach(k=>gdType.appendChild(opt(null,k)));
+  updateGDSubtypes();
+
+  const gdTo = document.getElementById('gdTo');
+  gdTo.innerHTML='';
+  ['officerSHO','officerIO','officerCO','officerSP'].forEach(k=>gdTo.appendChild(opt(null,k)));
+
+  const firType = document.getElementById('firTypeSel');
+  firType.innerHTML=''; ['firTypeStd','firTypeZero','firTypeEdar'].forEach(k=>firType.appendChild(opt(null,k)));
+  const firFilter = document.getElementById('firFilterSel');
+  firFilter.innerHTML=''; ['filter7d','filter1m','filter3m'].forEach(k=>firFilter.appendChild(opt(null,k)));
+  document.getElementById('firStationInput').value = currentLang==='hi' ? 'केंद्रीय थाना' : 'Central Police Station';
+  const firGd = document.getElementById('firGdSel');
+  firGd.innerHTML=''; firGd.appendChild(opt(null,'firGdNew')); const o2=document.createElement('option'); o2.textContent='GD/2026/0088 — '+t('gdTypeInvestigation'); firGd.appendChild(o2);
+  const firHead = document.getElementById('firHeadSel'); firHead.innerHTML=''; ['headMajor','headMinor'].forEach(k=>firHead.appendChild(opt(null,k)));
+  const firTag = document.getElementById('firTagSel'); firTag.innerHTML=''; ['tagNone','tagNE','tagKhalistani'].forEach(k=>firTag.appendChild(opt(null,k)));
+  const firLoc = document.getElementById('firLocSel'); firLoc.innerHTML=''; ['locPublic','locPrivate'].forEach(k=>firLoc.appendChild(opt(null,k)));
+  const firAddr = document.getElementById('firAddrSel'); firAddr.innerHTML=''; ['addrPermanent','addrCurrent'].forEach(k=>firAddr.appendChild(opt(null,k)));
+  const firVideo = document.getElementById('firVideoSel'); firVideo.innerHTML=''; ['yes','no'].forEach(k=>firVideo.appendChild(opt(null,k)));
+  const firZero = document.getElementById('firZeroSel'); firZero.innerHTML=''; ['tagNone','zeroOtherJur'].forEach(k=>firZero.appendChild(opt(null,k)));
+  const firCourt = document.getElementById('firCourtSel'); firCourt.innerHTML=''; ['yes','no'].forEach(k=>firCourt.appendChild(opt(null,k)));
+
+  const ncrIo = document.getElementById('ncrIoSel'); ncrIo.innerHTML=''; ['ncrIOAuto','ncrIOManual'].forEach(k=>ncrIo.appendChild(opt(null,k)));
+
+  const mlcInc = document.getElementById('mlcIncSel'); mlcInc.innerHTML=''; ['mlcAssault','mlcLiquor','mlcAccident'].forEach(k=>mlcInc.appendChild(opt(null,k)));
+  const mlcTrans = document.getElementById('mlcTransSel'); mlcTrans.innerHTML=''; ['mlcAmbulance','mlcNeighbor','mlcPoliceVeh'].forEach(k=>mlcTrans.appendChild(opt(null,k)));
+  const mlcGd = document.getElementById('mlcGdSel'); mlcGd.innerHTML=''; mlcGd.appendChild(opt(null,'mlcGdCreate'));
+
+  const propType = document.getElementById('propTypeSel'); propType.innerHTML=''; ['propUnclaimed','propStranger','propUnknownPerson'].forEach(k=>propType.appendChild(opt(null,k)));
+
+  gdFilterType.value = prevVal || '';
+}
+
+function updateGDSubtypes(){
+  const gdSubtypesData = {
+    gdTypeInvestigation: {hi:['जमानत विवरण','FIR स्थानांतरण','किशोर न्याय बोर्ड प्रक्रिया','हिरासत उपरांत चिकित्सा जांच'],
+                           en:['Bail details','FIR transfer','Juvenile Justice Board procedures','Post-custody medical examination']},
+    gdTypeAdmin: {hi:['बाहरी बल आगमन','साप्ताहिक अवकाश','नकद रजिस्टर लेखा-परीक्षा','मालखाना निरीक्षण','स्टाफ हेडकाउंट'],
+                  en:['Arrival of external forces','Weekly rest','Cash register audit','Malkhana inspection','Staff headcount']},
+    gdTypeDeparture: {hi:['गश्त हेतु प्रस्थान','ग्राम भ्रमण','कॉम्बिंग','नाकाबंदी'],
+                       en:['Departure for patrolling','Village visit','Combing','Blockade']},
+    gdTypeArrival: {hi:['क्षेत्रीय ड्यूटी से वापसी'], en:['Return from field duty']},
+    gdTypeRegistration: {hi:['मेडिको-लीगल केस','लावारिस संपत्ति','आपराधिक केस GD'], en:['Medico-legal case','Unclaimed property','Criminal case GD']},
+    gdTypeOthers: {hi:['असाइन न किया गया सामान्य कार्य'], en:['Unassigned general activity']}
+  };
+  const type = document.getElementById('gdType').value;
+  const sel = document.getElementById('gdSubtype');
+  const list = (gdSubtypesData[type] && gdSubtypesData[type][currentLang]) || [];
+  sel.innerHTML = list.map(s=>`<option>${s}</option>`).join('');
+}
+
+function charCount(el,id,max){ document.getElementById(id).textContent = el.value.length; }
+
+// NAV
+function showPage(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  const target = document.getElementById('page-'+id);
+  if(target) target.classList.add('active');
+  document.querySelectorAll('.nav-item[data-page], .submenu a[data-page]').forEach(el=>el.classList.remove('active'));
+  document.querySelectorAll('[data-page="'+id+'"]').forEach(el=>{
+    if(el.classList.contains('nav-item')||el.tagName==='A') el.classList.add('active');
+  });
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+document.querySelectorAll('[data-page]').forEach(el=>{
+  el.addEventListener('click', (e)=>{ e.preventDefault(); showPage(el.getAttribute('data-page')); });
+});
+document.querySelectorAll('[data-toggle]').forEach(el=>{
+  el.addEventListener('click', ()=>{
+    const sub = document.getElementById('sub-'+el.getAttribute('data-toggle'));
+    el.classList.toggle('open');
+    sub.classList.toggle('open');
+  });
+});
+document.querySelector('[data-toggle="gd"]').classList.add('open');
+document.getElementById('sub-gd').classList.add('open');
+
+// CHARTS
+let trendChart, donutWomenChart, donutChildrenChart;
+function crimeData(){
+  return {
+    all: {labels: currentLang==='hi' ? ['शस्त्र','हत्या का प्रयास','चोरी','जालसाजी','आपराधिक षड्यंत्र','झूठे साक्ष्य','अपहरण','हत्या','दुष्कर्म','चोरी','महिला अपराध']
+                                       : ['Arms','Attempt to Murder','Theft','Forgery','Criminal Conspiracy','False Evidence','Kidnapping','Murder','Rape','Theft','Women'],
+          values:[94,82,63,52,50,35,34,32,25,12,5]},
+    heinous: {labels: currentLang==='hi' ? ['हत्या','दुष्कर्म','अपहरण','डकैती','हत्या का प्रयास'] : ['Murder','Rape','Kidnapping','Dacoity','Attempt to Murder'], values:[32,25,34,18,82]},
+    nonheinous: {labels: currentLang==='hi' ? ['जालसाजी','आपराधिक षड्यंत्र','झूठे साक्ष्य','चोरी','शस्त्र'] : ['Forgery','Criminal Conspiracy','False Evidence','Theft','Arms'], values:[52,50,35,63,94]}
+  };
+}
+function initCharts(){
+  const ctx = document.getElementById('crimeTrendChart');
+  const d = crimeData().all;
+  trendChart = new Chart(ctx, {
+    type:'bar',
+    data:{ labels:d.labels, datasets:[{ data:d.values, backgroundColor:'#5a3a92', borderRadius:4, maxBarThickness:34 }]},
+    options:{ plugins:{legend:{display:false}}, scales:{ y:{beginAtZero:true, grid:{color:'#eee6fb'}}, x:{grid:{display:false}, ticks:{font:{size:10}}} } }
+  });
+  donutWomenChart = new Chart(document.getElementById('donutWomen'), {
+    type:'doughnut',
+    data:{ datasets:[{ data:[45,18,25,12], backgroundColor:['#c22a72','#e37fab','#f3b6cf','#f8dbe8'], borderWidth:0 }]},
+    options:{ plugins:{legend:{display:false}}, cutout:'68%' }
+  });
+  donutChildrenChart = new Chart(document.getElementById('donutChildren'), {
+    type:'doughnut',
+    data:{ datasets:[{ data:[38,15,29,18], backgroundColor:['#2f8fd1','#6cb3e0','#a8d3ee','#dcedfa'], borderWidth:0 }]},
+    options:{ plugins:{legend:{display:false}}, cutout:'68%' }
+  });
+  document.querySelectorAll('#crimeFilter input').forEach(r=>{
+    r.addEventListener('change', ()=>{
+      const dd = crimeData()[r.value];
+      trendChart.data.labels = dd.labels;
+      trendChart.data.datasets[0].data = dd.values;
+      trendChart.update();
+    });
+  });
+}
+function refreshCharts(){
+  const active = document.querySelector('#crimeFilter input:checked').value;
+  const dd = crimeData()[active];
+  trendChart.data.labels = dd.labels;
+  trendChart.data.datasets[0].data = dd.values;
+  trendChart.update();
+}
+
+// PENDING TASKS
+function renderPendingTasks(){
+  const tasks = [
+    {statusKey:'statusInvestigation', cls:'b-investigation'},
+    {statusKey:'statusEvidence', cls:'b-evidence'},
+    {statusKey:'statusActiveSearch', cls:'b-search'},
+    {statusKey:'statusForensic', cls:'b-forensic'},
+  ];
+  document.getElementById('pendingTasksBody').innerHTML = tasks.map(tk=>`
+    <tr><td>${t('taskName')}<br><span style="color:var(--muted);font-size:11px;">FIR-2024-089</span></td>
+    <td>15 Mar 2025</td><td>010/2025</td>
+    <td><span class="badge ${tk.cls}">${t(tk.statusKey)}</span></td></tr>`).join('');
+}
+
+// CALENDAR
+let calDate = new Date(2026,8,1);
+function renderCalendar(){
+  const y = calDate.getFullYear(), m = calDate.getMonth();
+  const monthNames = currentLang==='hi'
+    ? ['जनवरी','फरवरी','मार्च','अप्रैल','मई','जून','जुलाई','अगस्त','सितंबर','अक्टूबर','नवंबर','दिसंबर']
+    : ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  document.getElementById('calMonthLabel').textContent = monthNames[m] + ' ' + y;
+  const first = new Date(y,m,1).getDay();
+  const days = new Date(y,m+1,0).getDate();
+  const dows = currentLang==='hi' ? ['र','सो','मं','बु','गु','शु','श'] : ['Su','Mo','Tu','We','Th','Fr','Sa'];
+  let html = dows.map(d=>`<div class="dow">${d}</div>`).join('');
+  for(let i=0;i<first;i++) html += `<div class="day blank"></div>`;
+  const today = new Date();
+  for(let d=1; d<=days; d++){
+    const isToday = today.getFullYear()===y && today.getMonth()===m && today.getDate()===d;
+    html += `<div class="day${isToday?' today':''}">${d}</div>`;
+  }
+  document.getElementById('calGrid').innerHTML = html;
+}
+document.getElementById('calPrev').onclick = ()=>{ calDate.setMonth(calDate.getMonth()-1); renderCalendar(); };
+document.getElementById('calNext').onclick = ()=>{ calDate.setMonth(calDate.getMonth()+1); renderCalendar(); };
+
+// GENERAL DIARY LIST
+let gdEntries = [
+  {no:'GD/2026/0142', typeKey:'gdTypeInvestigation', sub:{hi:'FIR स्थानांतरण',en:'FIR transfer'}, dt:'12-Sep-2026 09:20', subject:{hi:'पूछताछ हेतु स्थानांतरण',en:'Transferred for questioning'}, toKey:'officerIO'},
+  {no:'GD/2026/0141', typeKey:'gdTypeAdmin', sub:{hi:'मालखाना निरीक्षण',en:'Malkhana inspection'}, dt:'11-Sep-2026 18:05', subject:{hi:'साप्ताहिक मालखाना जांच',en:'Weekly malkhana check'}, toKey:'officerSHO'},
+  {no:'GD/2026/0140', typeKey:'gdTypeDeparture', sub:{hi:'गश्त हेतु प्रस्थान',en:'Departure for patrolling'}, dt:'11-Sep-2026 14:00', subject:{hi:'नियमित गश्त',en:'Routine patrol'}, toKey:'officerCO'},
+];
+function renderGDList(){
+  const typeF = document.getElementById('gdFilterType').value;
+  const textF = (document.getElementById('gdFilterText').value||'').trim();
+  const rows = gdEntries.filter(g => (!typeF || g.typeKey===typeF) && (!textF || g.subject[currentLang].includes(textF) || g.no.includes(textF)));
+  document.getElementById('gdListBody').innerHTML = rows.map(g=>`
+    <tr><td>${g.no}</td><td>${t(g.typeKey)}</td><td>${g.sub[currentLang]}</td><td>${g.dt}</td><td>${g.subject[currentLang]}</td><td>${t(g.toKey)}</td>
+    <td><button class="btn ghost">${t('btnView')}</button></td></tr>`).join('') || `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px;">${t('noEntries')}</td></tr>`;
+}
+
+function resetGDForm(){
+  document.getElementById('gdSubject').value='';
+  document.getElementById('gdBody').value='';
+  document.getElementById('gdDelay').value='';
+  charCount(document.getElementById('gdSubject'),'subCount',100);
+  charCount(document.getElementById('gdBody'),'bodyCount',1000);
+}
+function submitGD(){
+  const typeKey = ['gdTypeInvestigation','gdTypeAdmin','gdTypeDeparture','gdTypeArrival','gdTypeRegistration','gdTypeOthers'][document.getElementById('gdType').selectedIndex];
+  const sub = document.getElementById('gdSubtype').value;
+  const subjectText = document.getElementById('gdSubject').value || '—';
+  gdEntries.unshift({no:'GD/2026/0'+(143+gdEntries.length), typeKey, sub:{hi:sub,en:sub}, dt:new Date().toLocaleString(currentLang==='hi'?'hi-IN':'en-IN'), subject:{hi:subjectText,en:subjectText}, toKey:'officerSHO'});
+  showToast(t('toastGD'));
+  resetGDForm();
+  showPage('gd-view');
+  renderGDList();
+}
+
+// ROLL CALL
+function renderRollcall(){
+  const staff = [
+    {nameHi:'निरीक्षक R. Sharma', nameEn:'Inspector R. Sharma', rankKey:'rankInspector', statusKey:'statusPresent'},
+    {nameHi:'उ.नि. A. Verma', nameEn:'SI A. Verma', rankKey:'rankSI', statusKey:'statusOutDuty'},
+    {nameHi:'उ.नि. K. Singh', nameEn:'SI K. Singh', rankKey:'rankSI', statusKey:'statusAbsent'},
+    {nameHi:'आरक्षक M. Yadav', nameEn:'Constable M. Yadav', rankKey:'rankConstable', statusKey:'statusPresent'},
+    {nameHi:'आरक्षक S. Kumar', nameEn:'Constable S. Kumar', rankKey:'rankConstable', statusKey:'statusSick'},
+  ];
+  document.getElementById('rollcallBody').innerHTML = staff.map(s=>`
+    <tr><td>${currentLang==='hi'?s.nameHi:s.nameEn}</td><td>${t(s.rankKey)}</td><td><span class="badge b-investigation">${t(s.statusKey)}</span></td></tr>`).join('');
+}
+
+// COMPLAINTS
+let complaints = [
+  {no:'CMP/2026/088', dt:'10-Sep-2026', name:'Ramesh Verma', sub:'Wallet theft near market', io:'SI A. Verma', statusKey:'statusPending'},
+  {no:'CMP/2026/087', dt:'08-Sep-2026', name:'Suresh Sharma', sub:'Noise complaint late night', io:'SI K. Singh', statusKey:'statusApproved'}
+];
+
+function toggleComplaintForm(){
+  const f = document.getElementById('complaintForm');
+  f.style.display = f.style.display==='none' ? 'block' : 'none';
+}
+
+function submitComplaint(){
+  const name = document.getElementById('compName').value || 'Anonymous';
+  const sub = document.getElementById('compSub').value || 'General Complaint';
+  complaints.unshift({
+    no: 'CMP/2026/0' + (89 + complaints.length),
+    dt: '12-Sep-2026',
+    name: name,
+    sub: sub,
+    io: 'Unassigned',
+    statusKey: 'statusPending'
+  });
+  showToast(t('toastComplaint'));
+  toggleComplaintForm();
+  renderComplaints();
+}
+
+function renderComplaints(){
+  document.getElementById('complaintsBody').innerHTML = complaints.map(c=>`
+    <tr>
+      <td>${c.no}</td>
+      <td>${c.dt}</td>
+      <td>${c.name}</td>
+      <td>${c.sub}</td>
+      <td>${c.io}</td>
+      <td><span class="badge b-investigation">${t(c.statusKey)}</span></td>
+      <td><button class="btn ghost">${t('btnView')}</button></td>
+    </tr>
+  `).join('');
+}
+
+// FIR WIZARD STEPPER
+let currentStep = 0;
+const totalSteps = 7;
+
+function renderStepper(){
+  const stepKeys = ['step1','step2','step3','step4','step5','step6','step7'];
+  let html = '';
+  for(let i=0; i<totalSteps; i++){
+    let cls = 'step-pill';
+    if(i === currentStep) cls += ' active';
+    else if(i < currentStep) cls += ' done';
+    html += `<div class="${cls}">${i+1}. ${t(stepKeys[i])}</div>`;
+  }
+  document.getElementById('firStepper').innerHTML = html;
+  document.getElementById('firPrev').style.display = currentStep === 0 ? 'none' : 'inline-block';
+  document.getElementById('firNext').textContent = currentStep === totalSteps - 1 ? t('btnSubmit') : t('btnNext');
+}
+
+function firNav(dir){
+  if(dir === 1 && currentStep === totalSteps - 1){
+    showToast(t('toastFir'));
+    currentStep = 0;
+    showPage('dashboard');
+    return;
+  }
+  currentStep = Math.max(0, Math.min(totalSteps - 1, currentStep + dir));
+  document.querySelectorAll('#page-reg-fir .step-panel').forEach(p=>{
+    p.classList.toggle('active', parseInt(p.getAttribute('data-step')) === currentStep);
+  });
+  renderStepper();
+}
+
+function sendOtp(){
+  document.getElementById('otpMsg').style.display = 'block';
+}
+
+function showToast(msg){
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.classList.add('show');
+  setTimeout(()=>toast.classList.remove('show'), 3000);
+}
+
+// INITIALIZATION
+window.addEventListener('DOMContentLoaded', ()=>{
+  document.getElementById('loginTime').textContent = new Date().toLocaleString('en-IN', {dateStyle:'medium', timeStyle:'short'});
+  setLang('hi');
+  initCharts();
+});
+</script>
+</body>
+</html>
