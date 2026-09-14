@@ -1,5 +1,6 @@
 import csv
 import json
+import os
 import random
 from datetime import datetime, timedelta
 
@@ -140,12 +141,23 @@ def classify_vulnerability(age, gender, crime):
     else:
         return "General Offense"
 
-def save_csv(filename, data):
+def save_csv(filename, data, append=False):
+    """
+    append=False (default, used by every bulk generate_* pass): overwrites
+    the file with exactly `data`, as before.
+    append=True (used by register_custom_fir): if the file already exists
+    on disk, rows are written after the existing content (header kept
+    as-is); if it doesn't exist yet, it's created fresh with a header,
+    exactly like the non-append path.
+    """
     if not data:
         return
-    with open(filename, "w", newline="", encoding="utf-8") as csv_file:
+    file_exists = os.path.exists(filename)
+    mode = "a" if (append and file_exists) else "w"
+    with open(filename, mode, newline="", encoding="utf-8") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=list(data[0].keys()))
-        writer.writeheader()
+        if mode == "w":
+            writer.writeheader()
         writer.writerows(data)
 
 # ==========================================
@@ -271,7 +283,7 @@ CLEAN_IPS = ["49.36.12.84", "106.210.34.12", "157.33.12.90", "103.211.54.99"]
 def gen_imei(): return f"86{random.randint(1000000000003, 9999999999999)}"
 def gen_imsi(): return f"40445{random.randint(1000000020, 9999999999)}"
 
-def generate_telecom_data(fir_cases):
+def generate_telecom_data(fir_cases, append=False):
     sdr_records = []
     cdr_records = []
     ipdr_records = []
@@ -412,12 +424,11 @@ def generate_telecom_data(fir_cases):
                 "RAT Type": "4G/LTE"
             })
 
-    save_csv("Subscriber_Detail_Records.csv", sdr_records)
-    save_csv("Call_Recording.csv", cdr_records)
-    save_csv("IP_Detail_Records.csv", ipdr_records)
+    save_csv("Subscriber_Detail_Records.csv", sdr_records, append=append)
+    save_csv("Call_Recording.csv", cdr_records, append=append)
+    save_csv("IP_Detail_Records.csv", ipdr_records, append=append)
 
     return sdr_records, cdr_records, ipdr_records, case_suspicious_map
-
 # ==========================================
 # 5. VEHICLE INTELLIGENCE & MULTI-RULE ANOMALY ENGINE
 # ==========================================
@@ -441,7 +452,7 @@ def parse_vehicle_string(vehicle_str):
         # instead of crashing the whole pipeline mid-run.
         return {"plate": generate_number_plate(), "color": "White", "make_model": "Hyundai Creta"}
 
-def generate_vehicle_intelligence_and_detect_anomalies(fir_cases, case_suspicious_map):
+def generate_vehicle_intelligence_and_detect_anomalies(fir_cases, case_suspicious_map, append=False):
     vahan_db, sarathi_db, fastag_logs, anpr_logs, master_vehicle_records = [], [], [], [], []
     anomalies_detected = []
 
@@ -570,11 +581,11 @@ def generate_vehicle_intelligence_and_detect_anomalies(fir_cases, case_suspiciou
                     "Investigation Flag": anomaly_type if anomaly_type else "PASS"
                 })
 
-    save_csv("Vehicle_Summary.csv", master_vehicle_records)
-    save_csv("VAHAN_Database.csv", vahan_db)
-    save_csv("SARATHI_Database.csv", sarathi_db)
-    save_csv("FASTag_Toll_Logs.csv", fastag_logs)
-    save_csv("ANPR_Camera_Feeds.csv", anpr_logs)
+    save_csv("Vehicle_Summary.csv", master_vehicle_records, append=append)
+    save_csv("VAHAN_Database.csv", vahan_db, append=append)
+    save_csv("SARATHI_Database.csv", sarathi_db, append=append)
+    save_csv("FASTag_Toll_Logs.csv", fastag_logs, append=append)
+    save_csv("ANPR_Camera_Feeds.csv", anpr_logs, append=append)
 
     return vahan_db, sarathi_db, fastag_logs, anpr_logs, master_vehicle_records, anomalies_detected
 
@@ -698,7 +709,7 @@ def select_financial_suspect(case, case_suspicious_map):
     return role, name, phone
 
 
-def generate_financial_intelligence(fir_cases, case_suspicious_map):
+def generate_financial_intelligence(fir_cases, case_suspicious_map, append=False):
     bank_records, upi_records, merchant_records = [], [], []
     crypto_onchain, crypto_kyc, crypto_onoff = [], [], []
     itr_records, gst_records, cibil_records, roc_records = [], [], [], []
@@ -946,17 +957,17 @@ def generate_financial_intelligence(fir_cases, case_suspicious_map):
         financial_summary[-1]["Crypto_Involved"] = "YES" if crypto_here else "NO"
         financial_summary[-1]["Shell_Company_Involved"] = "YES" if shell_here else "NO"
 
-    save_csv("Financial_Summary.csv", financial_summary)
-    save_csv("Bank_Statement_Records.csv", bank_records)
-    save_csv("UPI_Payment_Gateway_Logs.csv", upi_records)
-    save_csv("Merchant_Gateway_Transaction_Logs.csv", merchant_records)
-    save_csv("Crypto_OnChain_Transactions.csv", crypto_onchain)
-    save_csv("Crypto_Exchange_KYC_Records.csv", crypto_kyc)
-    save_csv("Crypto_Exchange_OnOffRamp_Logs.csv", crypto_onoff)
-    save_csv("ITR_Forensic_Profile.csv", itr_records)
-    save_csv("GST_EWayBill_Records.csv", gst_records)
-    save_csv("CIBIL_Commercial_Credit_Report.csv", cibil_records)
-    save_csv("RoC_Shell_Company_Filings.csv", roc_records)
+    save_csv("Financial_Summary.csv", financial_summary, append=append)
+    save_csv("Bank_Statement_Records.csv", bank_records, append=append)
+    save_csv("UPI_Payment_Gateway_Logs.csv", upi_records, append=append)
+    save_csv("Merchant_Gateway_Transaction_Logs.csv", merchant_records, append=append)
+    save_csv("Crypto_OnChain_Transactions.csv", crypto_onchain, append=append)
+    save_csv("Crypto_Exchange_KYC_Records.csv", crypto_kyc, append=append)
+    save_csv("Crypto_Exchange_OnOffRamp_Logs.csv", crypto_onoff, append=append)
+    save_csv("ITR_Forensic_Profile.csv", itr_records, append=append)
+    save_csv("GST_EWayBill_Records.csv", gst_records, append=append)
+    save_csv("CIBIL_Commercial_Credit_Report.csv", cibil_records, append=append)
+    save_csv("RoC_Shell_Company_Filings.csv", roc_records, append=append)
 
     financial_records = {
         "summary": financial_summary, "bank": bank_records, "upi": upi_records, "merchant": merchant_records,
@@ -966,10 +977,600 @@ def generate_financial_intelligence(fir_cases, case_suspicious_map):
     return financial_records, financial_anomalies, case_financial_map
 
 # ==========================================
-# 7. UNIFIED GOVERNMENT REPORTING SYSTEM
+# 6.5 MEDICAL & FORENSIC INTELLIGENCE MODULE
+# ==========================================
+# Which forensic-medical reports get pulled for a case is driven entirely by
+# Case_Type (mirrors the "Bases to generate data" reference sheet: Post-Mortem
+# for suspected homicide, Toxicology for poisoning, DNA/Serology for
+# sexual-assault or kinship matching, Odontology/Skeletal for unidentified
+# remains, Clinical Assault (MLC) for living-victim injury, Psychiatric for a
+# competency/insanity evaluation of a known accused). Each report type also
+# carries its own probability so not every eligible case actually gets one --
+# e.g. not every Grievous Hurt victim ends up examined and logged, just like
+# not every case gets a financial trail pulled.
+
+HOSPITALS = [
+    "King Edward Memorial (KEM) Hospital, Mumbai", "Sion Hospital, Mumbai",
+    "Grant Government Medical College & JJ Hospital, Mumbai", "Cooper Hospital, Mumbai",
+    "Nair Hospital, Mumbai"
+]
+FSL_LABS = [
+    "State Forensic Science Laboratory (FSL), Kalina, Mumbai",
+    "Central Forensic Science Laboratory (CFSL), CBI, New Delhi",
+    "Regional Forensic Science Laboratory, Pune"
+]
+MLC_DOCTORS = ["Dr. Ananya Deshmukh (M.D. Forensic Medicine)", "Dr. Rohit Kamble (M.D. Forensic Medicine)", "Dr. Farida Shaikh (M.D. Forensic Medicine)"]
+PATHOLOGISTS = ["Dr. Suresh K. Patil (Forensic Pathologist)", "Dr. Vinayak Rao Jadhav (Forensic Pathologist)", "Dr. Alka N. Bhosale (Forensic Pathologist)"]
+TOXICOLOGISTS = ["Dr. Meena R. Iyer (Sr. Scientific Officer - Toxicology)", "Dr. Prashant Wagh (Scientific Officer - Toxicology)"]
+DNA_EXPERTS = ["Dr. K. V. Raman (Forensic DNA Expert)", "Dr. Shalini Menon (Forensic DNA Expert)"]
+SAFE_DOCTORS = ["Dr. Kavita Verma (M.S. OBGYN, Forensic Examiner)", "Dr. Nandita Rao (M.S. OBGYN, Forensic Examiner)"]
+PSYCH_BOARDS = ["Institute of Human Behaviour and Allied Sciences (IHBAS)", "Dept. of Forensic Psychiatry, JJ Hospital"]
+
+TOXIC_AGENTS = [
+    ("Organophosphate Insecticide (Phorate/Thimet)", "3.4 mg/L", "> 0.5 mg/L"),
+    ("Ethanol (Acute Intoxication)", "0.18% BAC", "> 0.08% BAC"),
+    ("Aluminium Phosphide (Rodenticide)", "2.1 mg/L", "> 0.5 mg/L"),
+    ("Opioid (Unspecified)", "25 ng/mL", "> 3 ng/mL")
+]
+
+# Case_Type -> which report types are eligible, and the probability each is
+# actually generated for a case of that type. Subject is always the VICTIM
+# unless noted; a separate PSYCHIATRIC roll (see below) targets the ACCUSED.
+CASE_MEDICAL_PROFILE = {
+    "Rape":                     {"SAFE": 0.90, "DNA": 0.60},
+    "Sexual Harassment":        {"CLINICAL_ASSAULT": 0.25},
+    "Stalking":                 {},
+    "Dowry Death":              {"POSTMORTEM": 0.85, "TOXICOLOGY": 0.45, "DNA": 0.35},
+    "Kidnapping of Minor":      {"CLINICAL_ASSAULT": 0.25},
+    "Child Trafficking":        {"CLINICAL_ASSAULT": 0.15},
+    "Murder":                   {"POSTMORTEM": 0.95, "TOXICOLOGY": 0.30, "DNA": 0.50, "ODONTOLOGY": 0.15},
+    "Attempt to Murder":        {"CLINICAL_ASSAULT": 0.90, "TOXICOLOGY": 0.20},
+    "Grievous Hurt":            {"CLINICAL_ASSAULT": 0.85},
+    "Acid Attack":              {"CLINICAL_ASSAULT": 0.95},
+    "Mob Lynching":             {"POSTMORTEM": 0.55, "CLINICAL_ASSAULT": 0.40},
+    "Theft":                    {},
+    "Snatching":                {"CLINICAL_ASSAULT": 0.15},
+    "Robbery":                  {"CLINICAL_ASSAULT": 0.35},
+    "Dacoity":                  {"CLINICAL_ASSAULT": 0.30},
+    "Extortion":                {},
+    "Criminal Breach of Trust": {},
+    "Cyber Fraud":              {},
+    "Organized Crime Syndicate":{"POSTMORTEM": 0.25, "CLINICAL_ASSAULT": 0.30},
+    "Petty Organized Crime":    {"CLINICAL_ASSAULT": 0.20},
+    "Terrorist Act":            {"POSTMORTEM": 0.50, "CLINICAL_ASSAULT": 0.50, "DNA": 0.30},
+}
+
+# Categories where a known accused might plausibly get a competency /
+# insanity-defense psychiatric evaluation. Low probability - most cases never
+# reach that stage.
+PSYCH_EVAL_CATEGORIES = ["Violent", "Organized", "State/Terror", "Women/Children"]
+
+
+def pick_medical_subject(case, role="VICTIM"):
+    """Pulls the name/age/gender/phone/address for whichever role the report
+    concerns, straight from the FIR row, so every medical record matches the
+    rest of the case file exactly."""
+    if role == "ACCUSED":
+        name = case.get("Accused_Name_Alias", "Unknown Accused")
+        phone = sanitize_phone(case.get("Accused_Contact"))
+        address = case.get("Accused_Address", case.get("District", "Maharashtra"))
+        age = random.randint(22, 55)
+        gender = random.choice(["Male", "Female"])
+    else:
+        name = case.get("Victim_Name", "Unknown Victim")
+        phone = sanitize_phone(case.get("Victim_Contact"))
+        address = case.get("Place_of_Occurrence", case.get("District", "Maharashtra"))
+        try:
+            age = int(case.get("Victim_Age"))
+        except (TypeError, ValueError):
+            age = random.randint(18, 55)
+        gender = case.get("Victim_Gender") or random.choice(["Male", "Female"])
+    return {"name": name, "age": age, "gender": gender, "phone": phone, "address": address}
+
+
+def generate_mlc_record(case, subject, exam_dt):
+    injuries = random.choice([
+        "Incised wound (8cm x 1.5cm x muscle deep) over left forearm; dark purple contusion over right temporal region",
+        "Multiple parallel contusions on forearms consistent with defensive positioning against a blunt object",
+        "Lacerated wound (4cm) on scalp; abrasions over both knees",
+        "Deep stab wound (3cm x 1cm) over left flank; superficial cuts on both palms"
+    ])
+    legal_class = random.choice(["Simple", "Grievous (Dangerous to life if untreated u/s 116 BNS)"])
+    return {
+        "Case_ID": case["FIR_No"],
+        "MLC_Case_Number": f"MLC-{case['Year']}/{random.randint(1000,9999)}-MUM",
+        "Examining_Facility": random.choice(HOSPITALS),
+        "Examining_Medical_Officer": random.choice(MLC_DOCTORS),
+        "Requisitioning_Police_Station": case["Police_Station"],
+        "Patient_Name": subject["name"],
+        "Patient_Contact": subject["phone"],
+        "Age": subject["age"],
+        "Gender": subject["gender"],
+        "Exam_Date_Time": exam_dt.strftime("%Y-%m-%d %H:%M"),
+        "Informed_Consent": "Written Informed Consent Obtained",
+        "History_of_Incident": f"Alleged {case['Case_Type']} at {case['Place_of_Occurrence']}",
+        "External_Injuries": injuries,
+        "Age_of_Injuries": "Fresh (Less than 24 hours old)",
+        "Legal_Classification": legal_class,
+        "Toxicology_Check": "Blood Alcohol Content: 0.00 mg/dL (Negative)",
+        "Medical_Action_Taken": random.choice(["Wound debridement & suturing done; discharged with follow-up",
+                                                "Admitted for observation; CT scan ordered", "Treated as outpatient"])
+    }
+
+
+def generate_postmortem_record(case, subject, exam_dt, unidentified=False):
+    cause = random.choice([
+        "Hemorrhagic shock secondary to multiple stab wounds",
+        "Cranio-cerebral damage due to blunt force trauma",
+        "Asphyxia due to manual strangulation",
+        "Hemorrhagic shock and cardiac tamponade secondary to firearm injury"
+    ])
+    deceased_name = "Unidentified " + subject["gender"] + f" (Tag ID: UM-{case['Year']}-{random.randint(1000,9999)})" if unidentified else subject["name"]
+    return {
+        "Case_ID": case["FIR_No"],
+        "Autopsy_Report_Number": f"PM-{case['Year']}-{random.randint(1000,9999)}/FMD",
+        "Mortuary_Hospital": random.choice(HOSPITALS),
+        "Lead_Pathologist": random.choice(PATHOLOGISTS),
+        "Inquest_Authority": f"PSI {random.choice(LAST_NAMES)} (Crime Branch)",
+        "Deceased_Name_or_ID": deceased_name,
+        "Identification_Status": "Unidentified" if unidentified else "Identified",
+        "Estimated_Age_Sex": f"{subject['age']} Years / {subject['gender']}",
+        "Estimated_Time_of_Death": (exam_dt - timedelta(hours=random.randint(6, 20))).strftime("%Y-%m-%d %H:%M"),
+        "Rigor_Mortis_Lividity": "Rigor mortis fully established; fixed lividity on dorsal surface",
+        "External_Findings": "Lacerated/incised entry wound(s) with surrounding contusion",
+        "Internal_Findings": random.choice(["Perforation of left ventricle; hemopericardium",
+                                             "Subdural hematoma with cerebral edema",
+                                             "Fractured hyoid bone; petechial hemorrhages"]),
+        "Preserved_Evidence": "Viscera in saturated salt solution; blood on FTA card for DNA profiling",
+        "Cause_of_Death": cause
+    }
+
+
+def generate_toxicology_record(case, subject, exam_dt):
+    agent, conc, threshold = random.choice(TOXIC_AGENTS)
+    return {
+        "Case_ID": case["FIR_No"],
+        "Toxicology_Lab_Ref": f"FSL-TOX-{case['Year']}-{random.randint(10000,99999)}",
+        "Testing_Laboratory": random.choice(FSL_LABS),
+        "Requesting_Authority": f"Metropolitan Magistrate Court, {case['District']}",
+        "Subject_Name": subject["name"],
+        "Age_Gender": f"{subject['age']} Years / {subject['gender']}",
+        "Specimens_Received": "Viscera Sample & Preserved Femoral Blood",
+        "Reporting_Expert": random.choice(TOXICOLOGISTS),
+        "Methodology": "Gas Chromatography-Mass Spectrometry (GC-MS) & HPLC",
+        "Toxic_Agent_Identified": agent,
+        "Concentration_vs_Lethal_Threshold": f"{conc} (Lethal Threshold: {threshold})",
+        "Toxicological_Conclusion": f"Toxic concentration of {agent.split(' (')[0]} detected; consistent with the case circumstances."
+    }
+
+
+def generate_dna_record(case, subject, exam_dt, role):
+    match = random.random() < 0.75
+    return {
+        "Case_ID": case["FIR_No"],
+        "DNA_Case_File_Number": f"DNA-FSL-{case['Year']}-{random.randint(10000,99999)}",
+        "Testing_Laboratory": random.choice(FSL_LABS),
+        "Investigating_Unit": f"{case['Police_Station']} Crime Branch Unit",
+        "Exhibits_Received": "Exhibit A1: Crime-scene biological sample; Exhibit B1: Reference buccal swab",
+        "Subject_Name": subject["name"],
+        "Subject_Role": role,
+        "Reporting_Expert": random.choice(DNA_EXPERTS),
+        "STR_Loci_Analyzed": "24 Autosomal STR Loci (CODIS panel)",
+        "DNA_Matching_Result": "Single-source profile matches reference exhibit at all 24 STR loci" if match else "No match to reference exhibit; profile logged to CODIS database",
+        "Match_Probability": f"1 in {random.randint(1,9)}.{random.randint(1,9)} x 10^{random.randint(15,19)}" if match else "N/A",
+        "Forensic_Verdict": f"Biological evidence attributed to {subject['name']}" if match else "Source of biological evidence remains unidentified"
+    }
+
+
+def generate_safe_record(case, subject, exam_dt):
+    return {
+        "Case_ID": case["FIR_No"],
+        "SAFE_Case_Number": f"SAFE-{case['Year']}-{random.randint(1000,9999)}",
+        "Examining_Center": random.choice(HOSPITALS) + " / One Stop Crisis Centre",
+        "Examining_Doctor": random.choice(SAFE_DOCTORS),
+        "Patient_Name": subject["name"] if random.random() < 0.5 else "Victim 'X' (Name withheld per legal mandate)",
+        "Age_Gender": f"{subject['age']} Years / {subject['gender']}",
+        "Time_Elapsed_Post_Incident": f"{random.randint(1,48)} Hours",
+        "Extragenital_Injuries": random.choice(["Petechial contusions on inner thighs; grip-mark ecchymosis on upper arms",
+                                                 "No significant extragenital injuries noted"]),
+        "Genital_Findings": random.choice(["Fresh posterior fourchette mucosal tear; acute hyperemia of introitus",
+                                            "No acute genital trauma noted"]),
+        "Evidence_Kit_Collected": "Vaginal swabs, pubic hair combings, foreign DNA swabs, sealed undergarments",
+        "Biological_Screening": random.choice(["Acid Phosphatase Test: POSITIVE | Sperm Screening: POSITIVE",
+                                                "Acid Phosphatase Test: NEGATIVE | Sperm Screening: NEGATIVE"]),
+        "Chain_of_Custody": f"SAFE Kit sealed (#FSL-SEAL-{random.randint(100000,999999)}) and handed to case IO"
+    }
+
+
+def generate_odontology_record(case, subject, unidentified=False):
+    return {
+        "Case_ID": case["FIR_No"],
+        "Odontology_Case_Ref": f"ODT-{case['Year']}-{random.randint(1000,9999)}",
+        "Examining_Lab": random.choice(FSL_LABS),
+        "Subject_Identification_Status": "Unidentified Remains" if unidentified else "Identified",
+        "Dental_Charting_Match": f"Post-mortem dental charting compared against ante-mortem records across {random.randint(6,16)} restorations",
+        "Conclusion": "Match confirmed to Missing Person record" if random.random() < 0.6 else "No ante-mortem dental record match found; profile retained for future comparison"
+    }
+
+
+def generate_skeletal_record(case, subject):
+    return {
+        "Case_ID": case["FIR_No"],
+        "Skeletal_Case_Ref": f"SKL-{case['Year']}-{random.randint(1000,9999)}",
+        "Examining_Lab": random.choice(FSL_LABS),
+        "Estimated_Age_Range": f"{max(subject['age']-5,15)}-{subject['age']+5} Years",
+        "Biological_Sex": subject["gender"],
+        "Ancestry_Estimate": "Asiatic/Indian",
+        "Stature_Estimate_cm": f"{random.randint(150,180)}-{random.randint(181,190)}",
+        "AnteMortem_Trauma": random.choice(["None noted", "Healed ante-mortem fracture noted on left femur"]),
+        "Conclusion": "Biological profile consistent with reported missing-person description" if random.random() < 0.5 else "Biological profile inconclusive for identification"
+    }
+
+
+def generate_psychiatric_record(case, subject):
+    return {
+        "Case_ID": case["FIR_No"],
+        "Evaluation_ID": f"FPSY-{case['Year']}-{random.randint(100,999)}",
+        "Evaluating_Board": random.choice(PSYCH_BOARDS),
+        "Subject_Name": subject["name"],
+        "Subject_Status": "Under Custodial Remand",
+        "Referring_Legal_Body": f"Sessions Court Judge, {case['District']}",
+        "Purpose": "Legal Insanity Defense (Sec 22 BNS) & Competency to Stand Trial",
+        "Mental_Status_Exam": "Oriented to time, place and person; logical thought; no active hallucinations/delusions",
+        "Psychometric_Testing": f"WAIS-IV IQ Score: {random.randint(85,120)} (Average Intelligence)",
+        "Psychiatric_Verdict": random.choice(["Subject knew the legal wrongfulness of the act at time of offense. MENTALLY FIT to stand trial.",
+                                               "Further psychiatric observation recommended before competency determination."])
+    }
+
+
+def generate_medical_forensic_intelligence(fir_cases, case_suspicious_map=None, append=False):
+    mlc_records, pm_records, tox_records = [], [], []
+    dna_records, safe_records, odonto_records = [], [], []
+    skeletal_records, psych_records = [], []
+    medical_summary = []
+    case_medical_map = {}
+
+    for case in fir_cases:
+        case_id = case["FIR_No"]
+        case_type = case["Case_Type"]
+        category = BNS_CRIME_DATABASE.get(case_type, {}).get("category", "")
+        profile = CASE_MEDICAL_PROFILE.get(case_type, {})
+
+        try:
+            occ_date = datetime.strptime(case["Date_Time_of_FIR"].split(" ")[0], "%Y-%m-%d")
+        except (ValueError, IndexError):
+            occ_date = datetime.strptime("2026-09-08", "%Y-%m-%d")
+        exam_dt = occ_date + timedelta(hours=random.randint(1, 10))
+
+        victim_subject = pick_medical_subject(case, role="VICTIM")
+        reports_generated = []
+
+        if "CLINICAL_ASSAULT" in profile and random.random() < profile["CLINICAL_ASSAULT"]:
+            mlc_records.append(generate_mlc_record(case, victim_subject, exam_dt))
+            reports_generated.append("MLC/Clinical Assault")
+
+        unidentified = False
+        if "POSTMORTEM" in profile and random.random() < profile["POSTMORTEM"]:
+            unidentified = random.random() < 0.2
+            pm_records.append(generate_postmortem_record(case, victim_subject, exam_dt, unidentified=unidentified))
+            reports_generated.append("Post-Mortem/Autopsy")
+            if unidentified and random.random() < 0.5:
+                odonto_records.append(generate_odontology_record(case, victim_subject, unidentified=True))
+                reports_generated.append("Forensic Odontology")
+            elif unidentified:
+                skeletal_records.append(generate_skeletal_record(case, victim_subject))
+                reports_generated.append("Skeletal Identification")
+
+        if "TOXICOLOGY" in profile and random.random() < profile["TOXICOLOGY"]:
+            tox_records.append(generate_toxicology_record(case, victim_subject, exam_dt))
+            reports_generated.append("Forensic Toxicology")
+
+        if "DNA" in profile and random.random() < profile["DNA"]:
+            dna_records.append(generate_dna_record(case, victim_subject, exam_dt, role="Victim"))
+            reports_generated.append("DNA Profiling")
+
+        if "SAFE" in profile and random.random() < profile["SAFE"]:
+            safe_records.append(generate_safe_record(case, victim_subject, exam_dt))
+            reports_generated.append("SAFE (Sexual Assault Forensic Exam)")
+
+        if "ODONTOLOGY" in profile and not unidentified and random.random() < profile["ODONTOLOGY"]:
+            odonto_records.append(generate_odontology_record(case, victim_subject, unidentified=False))
+            reports_generated.append("Forensic Odontology")
+
+        # Psychiatric competency/insanity evaluation - targets a KNOWN accused only.
+        if (category in PSYCH_EVAL_CATEGORIES and case.get("Accused_Status") == "Known"
+                and random.random() < 0.12):
+            accused_subject = pick_medical_subject(case, role="ACCUSED")
+            psych_records.append(generate_psychiatric_record(case, accused_subject))
+            reports_generated.append("Forensic Psychiatric Evaluation")
+
+        case_medical_map[case_id] = reports_generated
+        medical_summary.append({
+            "Case_ID": case_id,
+            "Case_Type": case_type,
+            "Subject_Name": victim_subject["name"],
+            "Reports_Generated": "; ".join(reports_generated) if reports_generated else "NONE"
+        })
+
+    save_csv("Medical_Forensic_Summary.csv", medical_summary, append=append)
+    save_csv("MLC_Clinical_Assault_Reports.csv", mlc_records, append=append)
+    save_csv("PostMortem_Autopsy_Reports.csv", pm_records, append=append)
+    save_csv("Forensic_Toxicology_Reports.csv", tox_records, append=append)
+    save_csv("DNA_Profiling_Reports.csv", dna_records, append=append)
+    save_csv("SAFE_Reports.csv", safe_records, append=append)
+    save_csv("Forensic_Odontology_Reports.csv", odonto_records, append=append)
+    save_csv("Skeletal_Identification_Reports.csv", skeletal_records, append=append)
+    save_csv("Forensic_Psychiatric_Reports.csv", psych_records, append=append)
+
+    medical_records = {
+        "summary": medical_summary, "mlc": mlc_records, "postmortem": pm_records,
+        "toxicology": tox_records, "dna": dna_records, "safe": safe_records,
+        "odontology": odonto_records, "skeletal": skeletal_records, "psychiatric": psych_records
+    }
+    return medical_records, case_medical_map
+
+
+# ==========================================
+# 7. OFFICER-SUBMITTED FIR REGISTRATION (single-case, incremental)
+# ==========================================
+# Unlike generate_fir_dataset() (which manufactures a whole random batch and
+# OVERWRITES every CSV), this path handles ONE real FIR coming in from the
+# dashboard's Manual Registration form or PDF-upload extraction, and APPENDS
+# its full multi-module trail to whatever is already on disk.
+
+def _existing_fir_row_count():
+    """How many FIR rows are already on disk, so a fallback FIR number and
+    Year default can be derived without clashing with the synthetic batch."""
+    if not os.path.exists("complete_fir_dataset.csv"):
+        return 0
+    with open("complete_fir_dataset.csv", newline="", encoding="utf-8") as f:
+        return sum(1 for _ in csv.DictReader(f))
+
+
+def determine_connectivity_type(case_type, acts_sections=None, district=None, related_locations=None):
+    """
+    Auto-classifies Connectivity_Type from crime classification alone, so the
+    registration form never needs to ask for it:
+      - Organized-crime categories (BNS Section 111 / 112) -> "Planed"
+      - Cyber Fraud / any "Cyber" category crime            -> "Planed"
+      - Occurrence spread across more than one district
+        (informant/victim/accused address, or place of
+        occurrence, differs from the FIR's filing district) -> "Planed"
+      - Everything else (sudden violent/property crimes)     -> "Unplaned"
+    """
+    crime_meta = BNS_CRIME_DATABASE.get(case_type, {})
+    category = crime_meta.get("category", "")
+    bns_text = str(acts_sections or crime_meta.get("bns", "") or "")
+
+    multi_district = False
+    if district and related_locations:
+        for loc in related_locations:
+            if loc and str(loc).strip() and str(loc).strip().lower() != str(district).strip().lower():
+                multi_district = True
+                break
+
+    if category == "Organized" or "111" in bns_text or category == "Cyber" or multi_district:
+        return "Planed"
+    return "Unplaned"
+
+
+def register_custom_fir(user_fir_data):
+    """
+    Registers ONE officer-submitted FIR (from manual form entry or a
+    PDF-extraction the officer has verified) and returns everything the
+    dashboard needs to show a confirmation and refresh the graph.
+
+    `user_fir_data` is a dict loosely matching the FIR schema (District,
+    Police_Station, Case_Type, Acts_Sections, Place_of_Occurrence,
+    Informant_Name/Contact/Address, Victim_Name/Age/Gender/Contact,
+    Accused_Name_Alias/Contact/Address, FIR_Narrative_Statement, ...).
+    Any field it does not supply is filled in with a sensible generated
+    default so the row has the exact shape generate_fir_dataset() produces
+    -- the downstream telecom / vehicle / financial generators depend on
+    that shape. Connectivity_Type, even if present in user_fir_data, is
+    IGNORED: it is always (re)computed here from the crime classification.
+
+    Side effects: appends one row to complete_fir_dataset.csv, and appends
+    that case's full telecom (SDR/CDR/IPDR), vehicle intelligence
+    (VAHAN/SARATHI/FASTag/ANPR) and financial/crypto/shell-company trail to
+    their respective CSVs. Never touches or reorders any existing row.
+    """
+    case_type = user_fir_data.get("Case_Type")
+    if case_type not in BNS_CRIME_DATABASE:
+        case_type = "Theft"
+    crime_meta = BNS_CRIME_DATABASE[case_type]
+
+    district = user_fir_data.get("District") or random.choice(DISTRICTS)
+    police_station = user_fir_data.get("Police_Station") or f"{district} PS"
+    acts_sections = user_fir_data.get("Acts_Sections") or crime_meta["bns"]
+    place_of_occurrence = user_fir_data.get("Place_of_Occurrence") or district
+
+    connectivity = determine_connectivity_type(
+        case_type, acts_sections=acts_sections, district=district,
+        related_locations=[
+            user_fir_data.get("Informant_Address"),
+            user_fir_data.get("Accused_Address"),
+            place_of_occurrence,
+        ],
+    )
+
+    fir_number = user_fir_data.get("FIR_No") or f"FIR/2026/{_existing_fir_row_count() + 1:04d}"
+
+    now = datetime.now()
+    report_dt_str = user_fir_data.get("Date_Time_of_FIR") or now.strftime("%Y-%m-%d %H:%M")
+    try:
+        report_dt = datetime.strptime(report_dt_str.split(" ")[0], "%Y-%m-%d")
+    except (ValueError, IndexError):
+        report_dt = now
+
+    min_n, max_n = crime_meta["severity"]
+    if connectivity == "Planed":
+        min_n += 2
+        max_n += 3
+    n_days_offset = random.randint(min_n, max_n)
+    occurrence_dt = report_dt - timedelta(days=n_days_offset)
+
+    victim_gender = user_fir_data.get("Victim_Gender") or random.choice(["Male", "Female"])
+    try:
+        victim_age = int(user_fir_data.get("Victim_Age"))
+    except (TypeError, ValueError):
+        victim_age = random.randint(3, 55) if crime_meta["category"] == "Women/Children" else random.randint(18, 75)
+
+    informant_name = user_fir_data.get("Informant_Name") or "Unknown Informant"
+    informant_father_husband = f"{random.choice(MALE_NAMES)} {(informant_name.split() or ['Kumar'])[-1]}"
+    victim_name = user_fir_data.get("Victim_Name") or "Unknown Victim"
+    accused_name = user_fir_data.get("Accused_Name_Alias") or "Unknown Accused"
+    accused_known = "unknown" not in accused_name.strip().lower()
+    accused_address = user_fir_data.get("Accused_Address") or random.choice(
+        COORDINATED_DISTRICTS if connectivity == "Planed" else DISTRICTS
+    )
+
+    prop_val = random.randint(5000, 500000) if crime_meta["category"] in ["Property", "Financial", "Cyber"] else 0
+
+    narrative = user_fir_data.get("FIR_Narrative_Statement") or (
+        f"On {occurrence_dt.strftime('%Y-%m-%d')}, an offense of {case_type} was reported at "
+        f"{police_station} by {informant_name}. Legal proceedings initiated under {acts_sections}."
+    )
+
+    # NOTE: Informant/Victim/Accused vehicle fields default to "None" -- the
+    # manual form / PDF schema doesn't currently collect free-text vehicle
+    # descriptions. If you want vehicle intelligence generated for a named
+    # vehicle on a custom FIR, pass e.g. user_fir_data["Accused_Vehicles"] =
+    # "MH-04-AB-1234 (White Hyundai Creta)" and it will flow through
+    # parse_vehicle_string() exactly like the synthetic batch does.
+    row = {
+        "District": district,
+        "Police_Station": police_station,
+        "State_UT": user_fir_data.get("State_UT") or "Maharashtra",
+        "FIR_No": fir_number,
+        "Year": report_dt.year,
+        "Date_Time_of_FIR": report_dt_str,
+        "Acts_Sections": acts_sections,
+        "Case_Type": case_type,
+        "Connectivity_Type": connectivity,
+        "Vulnerability_Category": classify_vulnerability(victim_age, victim_gender, case_type),
+        "Days_Offset_N": n_days_offset,
+        "Day_of_Occurrence": occurrence_dt.strftime("%A"),
+        "Occurrence_Date_Range": f"{occurrence_dt.strftime('%Y-%m-%d')} to {report_dt.strftime('%Y-%m-%d')}",
+        "Time_Period_Shift": random.choice(["Morning Shift", "Evening Shift", "Night Shift"]),
+        "GD_Reference_Entry_No": f"GD-{random.randint(100, 999)}/{report_dt.year}",
+        "Type_of_Information": user_fir_data.get("Type_of_Information") or "Written",
+        "Direction_Distance_from_PS": f"{random.randint(1, 15)} km {random.choice(['North', 'South', 'East', 'West'])}",
+        "Beat_No": f"Beat-{random.randint(1, 12)}",
+        "Place_of_Occurrence": place_of_occurrence,
+        "Outside_Jurisdiction_PS": "N/A",
+        "Informant_Name": informant_name,
+        "Informant_Father_Husband": informant_father_husband,
+        "Informant_Age": user_fir_data.get("Informant_Age") or random.randint(18, 75),
+        "Informant_Gender": user_fir_data.get("Informant_Gender") or random.choice(["Male", "Female"]),
+        "Informant_Nationality": "Indian",
+        "Informant_Passport_No": f"Z{random.randint(1000000, 9999999)}",
+        "Informant_Aadhaar": "[Aadhaar Redacted]",
+        "Informant_Occupation": user_fir_data.get("Informant_Occupation") or random.choice(
+            ["Business", "Service", "Student", "Unemployed", "Self-Employed"]
+        ),
+        "Informant_Address": user_fir_data.get("Informant_Address") or district,
+        "Informant_Contact": sanitize_phone(user_fir_data.get("Informant_Contact")),
+        "Informant_Vehicles": user_fir_data.get("Informant_Vehicles") or "None",
+        "Victim_Name": victim_name,
+        "Victim_Age": victim_age,
+        "Victim_Gender": victim_gender,
+        "Victim_Contact": sanitize_phone(user_fir_data.get("Victim_Contact")),
+        "Victim_Aadhaar": "[Aadhaar Redacted]",
+        "Victim_Vehicles": user_fir_data.get("Victim_Vehicles") or "None",
+        "Accused_Status": "Known" if accused_known else "Unknown",
+        "Number_of_Accused": 1 if accused_known else random.randint(1, 4),
+        "Accused_Name_Alias": accused_name,
+        "Accused_Contact": sanitize_phone(user_fir_data.get("Accused_Contact")),
+        "Accused_Address": accused_address,
+        "Accused_Build": random.choice(["Slim", "Medium", "Athletic", "Heavy"]),
+        "Accused_Height_cm": random.randint(155, 185),
+        "Accused_Complexion": random.choice(["Fair", "Wheatish", "Dark"]),
+        "Accused_Distinctive_Marks": random.choice(["Scar on left cheek", "Tattoo on right forearm", "Mole on neck", "None"]),
+        "Accused_Vehicles": user_fir_data.get("Accused_Vehicles") or "None",
+        "Accused_Vehicle_Identified_Probability": 1.0 if accused_known else 0.0,
+        "Reasons_for_Delay": random.choice(DELAY_REASONS) if n_days_offset > 2 else "None / Immediate Reporting",
+        "Inquest_UD_Case_No": f"UD-{random.randint(100, 999)}/{report_dt.year}" if crime_meta["category"] == "Violent" else "N/A",
+        "Property_Category_Type": random.choice(PROPERTY_TYPES) if prop_val > 0 else "N/A",
+        "Property_Description_Serial_No": f"Serial/IMEI-{random.randint(100000, 999999)}" if prop_val > 0 else "N/A",
+        "Total_Property_Value_INR": prop_val,
+        "FIR_Narrative_Statement": narrative,
+        "Action_Taken": "Registered & Took Up Investigation",
+        "Investigating_Officer_Name": user_fir_data.get("Investigating_Officer_Name") or (
+            f"Inspector {random.choice(MALE_NAMES)} {random.choice(LAST_NAMES)}"
+        ),
+        "IO_Badge_No": f"MH-POL-{random.randint(1000, 9999)}",
+        "Complainant_Sign_Acknowledged": "Yes",
+        "Free_Copy_Delivered": "Yes",
+        "Date_Time_Dispatch_to_Court": f"{report_dt.strftime('%Y-%m-%d')} 18:00",
+    }
+
+    # 1) Persist the FIR itself -- appended, the synthetic batch on disk is untouched.
+    save_csv("complete_fir_dataset.csv", [row], append=True)
+
+    # 2) Telecom / CDR / IPDR trail for this one case.
+    sdr, cdr, ipdr, case_map = generate_telecom_data([row], append=True)
+
+    # 3) Vehicle / VAHAN / SARATHI / FASTag / ANPR intelligence + anomaly detection.
+    vahan, sarathi, fastag, anpr, master_veh, vehicle_anomalies = \
+        generate_vehicle_intelligence_and_detect_anomalies([row], case_map, append=True)
+
+    # 4) Financial / crypto / shell-company trail (probabilistic tier assessment).
+    financial_records, financial_anomalies, case_financial_map = \
+        generate_financial_intelligence([row], case_map, append=True)
+
+    # 5) Medical & forensic examination trail (case-type driven, probabilistic).
+    medical_records, case_medical_map = \
+        generate_medical_forensic_intelligence([row], case_map, append=True)
+
+    all_anomalies = vehicle_anomalies + financial_anomalies
+
+    return {
+        "fir_case": row,
+        "connectivity_type": connectivity,
+        "sdr": sdr, "cdr": cdr, "ipdr": ipdr,
+        "vahan": vahan, "sarathi": sarathi, "fastag": fastag, "anpr": anpr,
+        "vehicle_summary": master_veh,
+        "financial_records": financial_records,
+        "financial_tier": case_financial_map.get(fir_number, {}).get("tier", "NONE"),
+        "medical_records": medical_records,
+        "medical_reports_generated": case_medical_map.get(fir_number, []),
+        "anomalies": all_anomalies,
+    }
+
+
+# ==========================================
+# 8. UNIFIED GOVERNMENT REPORTING SYSTEM
 # ==========================================
 
-def generate_unified_investigation_report(fir_cases, cdr_records, case_suspicious_map, master_veh, anomalies, financial_records, case_financial_map):
+# -----------------------------------------------------------------------------
+# ROADMAP-ONLY FORENSIC MODULES — labeled UNDER CONSTRUCTION in the unified
+# report (see sections 7-8 below) because they are not yet wired to a real
+# data source anywhere in this pipeline. Kept in one place so the dashboard
+# (sihdashboard.py -> REPORT_TABS) and this report generator stay in sync if
+# either list changes.
+# -----------------------------------------------------------------------------
+NON_MEDIA_FORENSIC_UNDER_CONSTRUCTION = [
+    "Volatile Memory Forensics",
+    "OS & Registry Artifacts",
+    "Network & Internet Logs",
+    "Location & Sensor Data",
+    "File System Artifacts",
+    "Browser & App Artifacts",
+    "Hardware & Peripheral Logs",
+]
+
+MULTIMEDIA_FORENSIC_UNDER_CONSTRUCTION = [
+    "Chats Analysis",
+    "Audio Analysis",
+    "Video Analysis",
+    "Image Analysis",
+]
+
+
+def generate_unified_investigation_report(fir_cases, cdr_records, case_suspicious_map, master_veh, anomalies, financial_records, case_financial_map, medical_records=None, case_medical_map=None):
+    medical_records = medical_records or {}
+    case_medical_map = case_medical_map or {}
     report_file = "FINAL_GOVERNMENT_CASE_INVESTIGATION_REPORT.txt"
 
     with open(report_file, "w", encoding="utf-8") as f:
@@ -1044,6 +1645,48 @@ def generate_unified_investigation_report(fir_cases, cdr_records, case_suspiciou
             else:
                 f.write(" [*] NO VEHICLE/IDENTITY/FINANCIAL ANOMALIES DETECTED FOR THIS CASE ID.\n\n")
 
+            f.write("----------------------------------------------------------------------------------------\n")
+            f.write("6. MEDICAL & FORENSIC EXAMINATION SUMMARY\n")
+            f.write("----------------------------------------------------------------------------------------\n")
+            reports_for_case = case_medical_map.get(case_id, [])
+            if not reports_for_case:
+                f.write(" [*] NO MEDICO-LEGAL / FORENSIC EXAMINATION RECORDS PULLED FOR THIS CASE.\n\n")
+            else:
+                f.write(f"Reports Generated : {'; '.join(reports_for_case)}\n")
+                for key, label, findings_field in [
+                    ("mlc", "MLC/Clinical Assault", "External_Injuries"),
+                    ("postmortem", "Post-Mortem/Autopsy", "Cause_of_Death"),
+                    ("toxicology", "Forensic Toxicology", "Toxicological_Conclusion"),
+                    ("dna", "DNA Profiling", "Forensic_Verdict"),
+                    ("safe", "SAFE Examination", "Biological_Screening"),
+                    ("odontology", "Forensic Odontology", "Conclusion"),
+                    ("skeletal", "Skeletal Identification", "Conclusion"),
+                    ("psychiatric", "Forensic Psychiatric Evaluation", "Psychiatric_Verdict"),
+                ]:
+                    match = next((r for r in medical_records.get(key, []) if r.get("Case_ID") == case_id), None)
+                    if match:
+                        f.write(f" - {label}: {match.get(findings_field, 'N/A')}\n")
+                f.write("\n")
+
+            f.write("----------------------------------------------------------------------------------------\n")
+            f.write("7. ADDITIONAL NON-MEDIA DIGITAL FORENSICS (VOLATILE MEMORY / OS & REGISTRY / NETWORK\n")
+            f.write("   LOGS / LOCATION & SENSOR DATA / FILE SYSTEM / BROWSER & APP / HARDWARE & PERIPHERAL)\n")
+            f.write("----------------------------------------------------------------------------------------\n")
+            f.write(" [!] UNDER CONSTRUCTION — these digital-forensics artifact categories are not yet\n")
+            f.write("     wired to a real data source in this build. Telecom Intelligence and Vehicle &\n")
+            f.write("     Location Intelligence (sections 2-3 above) remain fully functional.\n")
+            for module_name in NON_MEDIA_FORENSIC_UNDER_CONSTRUCTION:
+                f.write(f"     - {module_name}: UNDER CONSTRUCTION\n")
+            f.write("\n")
+
+            f.write("----------------------------------------------------------------------------------------\n")
+            f.write("8. MULTIMEDIA DIGITAL FORENSICS (CHATS / AUDIO / VIDEO / IMAGE ANALYSIS)\n")
+            f.write("----------------------------------------------------------------------------------------\n")
+            f.write(" [!] UNDER CONSTRUCTION — multimedia/media forensic analysis is not yet implemented.\n")
+            for module_name in MULTIMEDIA_FORENSIC_UNDER_CONSTRUCTION:
+                f.write(f"     - {module_name}: UNDER CONSTRUCTION\n")
+            f.write("\n")
+
             f.write("========================================================================================\n\n")
 
     print(f"\n[REPORT COMPLETE] Master Investigation Report successfully generated: '{report_file}'")
@@ -1057,43 +1700,49 @@ if __name__ == "__main__":
     print("      LAUNCHING INTEGRATED GOVERNMENT LAW ENFORCEMENT INTELLIGENCE PIPELINE ")
     print("==========================================================================\n")
 
-    print("[1/5] Generating 20 FIR cases with vehicle attributes...")
+    print("[1/6] Generating 20 FIR cases with vehicle attributes...")
     fir_cases = generate_fir_dataset(count=20)
     print("  └─ Saved: complete_fir_dataset.csv")
 
-    print("[2/5] Generating Telecom Records (SDR, CDR, IPDR) & flagging CDR suspects...")
+    print("[2/6] Generating Telecom Records (SDR, CDR, IPDR) & flagging CDR suspects...")
     sdr, cdr, ipdr, case_map = generate_telecom_data(fir_cases)
     print("  └─ Saved: Subscriber_Detail_Records.csv, Call_Recording.csv, IP_Detail_Records.csv")
 
-    print("[3/5] Running Multi-Rule Vehicle Intelligence Engine (VAHAN/SARATHI/FASTag/ANPR)...")
+    print("[3/6] Running Multi-Rule Vehicle Intelligence Engine (VAHAN/SARATHI/FASTag/ANPR)...")
     vahan, sarathi, fastag, anpr, master_veh, vehicle_anomalies = generate_vehicle_intelligence_and_detect_anomalies(fir_cases, case_map)
     print("  └─ Saved: Vehicle_Summary.csv, VAHAN_Database.csv, SARATHI_Database.csv, FASTag_Toll_Logs.csv, ANPR_Camera_Feeds.csv")
 
-    print("[4/5] Generating Financial & Cryptocurrency Intelligence (Bank/UPI/Merchant/Crypto/ITR/GST/CIBIL/RoC)...")
+    print("[4/6] Generating Financial & Cryptocurrency Intelligence (Bank/UPI/Merchant/Crypto/ITR/GST/CIBIL/RoC)...")
     financial_records, financial_anomalies, case_financial_map = generate_financial_intelligence(fir_cases, case_map)
     print("  └─ Saved: Financial_Summary.csv, Bank_Statement_Records.csv, UPI_Payment_Gateway_Logs.csv,")
     print("            Merchant_Gateway_Transaction_Logs.csv, Crypto_OnChain_Transactions.csv, Crypto_Exchange_KYC_Records.csv,")
     print("            Crypto_Exchange_OnOffRamp_Logs.csv, ITR_Forensic_Profile.csv, GST_EWayBill_Records.csv,")
     print("            CIBIL_Commercial_Credit_Report.csv, RoC_Shell_Company_Filings.csv")
 
+    print("[5/6] Generating Medical & Forensic Examination Records (MLC/Autopsy/Toxicology/DNA/SAFE/etc.)...")
+    medical_records, case_medical_map = generate_medical_forensic_intelligence(fir_cases, case_map)
+    print("  └─ Saved: Medical_Forensic_Summary.csv, MLC_Clinical_Assault_Reports.csv, PostMortem_Autopsy_Reports.csv,")
+    print("            Forensic_Toxicology_Reports.csv, DNA_Profiling_Reports.csv, SAFE_Reports.csv,")
+    print("            Forensic_Odontology_Reports.csv, Skeletal_Identification_Reports.csv, Forensic_Psychiatric_Reports.csv")
+
     all_anomalies = vehicle_anomalies + financial_anomalies
 
-    print("[5/5] Writing Final Master Investigation Report...")
-    generate_unified_investigation_report(fir_cases, cdr, case_map, master_veh, all_anomalies, financial_records, case_financial_map)
+    print("[6/6] Writing Final Master Investigation Report...")
+    generate_unified_investigation_report(fir_cases, cdr, case_map, master_veh, all_anomalies, financial_records, case_financial_map, medical_records, case_medical_map)
 
     print("\n==========================================================================")
     print("                      PIPELINE EXECUTION SUCCESSFUL                       ")
     print("==========================================================================")
 
     # ----------------------------------------------------------------
-    # [6/6] OPTIONAL: run the analysis modules right after generation,
+    # [7/7] OPTIONAL: run the analysis modules right after generation,
     # so a single `python main_investigation_pipeline.py` produces both
     # the raw data AND the relationship graph / network analytics /
     # intelligence alerts. Guarded with try/except so this file still
     # works standalone if the analysis modules aren't present yet.
     # ----------------------------------------------------------------
     try:
-        print("\n[6/6] Running relationship graph + network analytics + intelligence engine...")
+        print("\n[7/7] Running relationship graph + network analytics + intelligence engine...")
         from sihrelationship import build_relationship_graph
         from sihnetworkanalytics import run_network_analytics
         from sihintelligenceengine import run_full_intelligence_analysis
@@ -1110,4 +1759,4 @@ if __name__ == "__main__":
               f"{intel_report['meta']['critical_or_high_alerts']} critical/high)")
         print(f"  └─ cross-case suspect links found: {len([l for l in cross_case_links if l['cross_case']])}")
     except ImportError as e:
-        print(f"\n[6/6] Skipped analysis modules (not found yet): {e}")
+        print(f"\n[7/7] Skipped analysis modules (not found yet): {e}")
