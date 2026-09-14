@@ -1,4 +1,3 @@
-
 """
 sihrelationship.py
 ===================
@@ -34,14 +33,25 @@ bridges / communities / visualization) and `sihintelligenceengine.py`
 (pattern detection / alerts) both build on the graph produced here instead
 of re-parsing the CSVs themselves.
 
-LIMITATION (documented, not hidden): entity resolution here is done on
-normalized names + hard identifiers (phone/vehicle/account). Two different
-people who happen to share an exact name string will currently be merged
-into one node. Proper disambiguation (DOB, address, fuzzy matching) is a
-job for the NLP/entity-resolution stage planned later.
+ENTITY RESOLUTION (UPDATED)
+----------------------------
+Exact-name matching alone used to mean "Rahul Sharma", "Rahul Shrma" (typo),
+and "R. Sharma" became three disconnected PERSON nodes even when they were
+the same suspect. `resolve_person_aliases()` (see below) now runs every
+unique raw person name collected during ingestion through
+`entity_resolution.EntityResolver` -- phonetic blocking + Fellegi-Sunter
+probabilistic linkage over name similarity, shared phone, shared address,
+and shared vehicle -- and merges confirmed alias nodes into one canonical
+PERSON node before cross-case linking runs. Ambiguous pairs (not enough
+corroborating evidence) are NOT auto-merged; they're surfaced via
+`resolver.possible_matches_for_review()` for an investigator to confirm.
+Two different people who genuinely share an exact name string with no other
+distinguishing data can still be merged -- that residual case needs DOB or
+a government ID field, which isn't in the current CSVs.
 """
 
 import json
+import logging
 import os
 import re
 from collections import defaultdict
@@ -50,6 +60,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import networkx as nx
 import pandas as pd
 
+from sihentityresolution import EntityResolver, PersonRecord
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
+logger = logging.getLogger("RelationshipGraph")
+
 # ==========================================
 # 1. PIPELINE FILE LOCATIONS & OUTPUT PATHS
 # ==========================================
@@ -57,6 +72,7 @@ import pandas as pd
 PIPELINE_FILES = {
     "fir": "complete_fir_dataset.csv",
     "cdr": "Call_Recording.csv",
+    "sdr": "Subscriber_Detail_Records.csv",
     "fastag": "FASTag_Toll_Logs.csv",
     "bank": "Bank_Statement_Records.csv",
 }
@@ -145,6 +161,21 @@ def parse_bank_person_field(raw: Any) -> Tuple[Optional[str], Optional[str]]:
     return normalize_name(raw), None
 
 
+def _find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    """Case/whitespace-insensitive lookup of the first matching column name.
+    Used for SDR ingestion since the exact header text in
+    Subscriber_Detail_Records.csv isn't pinned down here -- if
+    main_investigation_pipeline.py uses a different phrasing than the
+    candidates below, add it to the relevant list rather than editing the
+    ingestion logic itself."""
+    normalized = {re.sub(r"[\s_]+", "", str(c)).lower(): c for c in df.columns}
+    for candidate in candidates:
+        key = re.sub(r"[\s_]+", "", candidate).lower()
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
 # ==========================================
 # 3. PIPELINE DATA LOADING
 # ==========================================
@@ -179,6 +210,16 @@ class RelationshipGraphBuilder:
         self.graph = nx.Graph()
         self.cross_case_links: List[Dict[str, Any]] = []
 
+        # ---- entity resolution / alias dedup state ----
+        # Aggregates every raw person name seen during ingestion with
+        # whatever phone/address/vehicle evidence has been seen for it, so
+        # resolve_person_aliases() can run Fellegi-Sunter linkage across
+        # ALL sources (FIR + SDR + Bank) at once, not per-table.
+        self._person_attrs: Dict[str, Dict[str, Any]] = {}
+        self.resolved_entities: list = []
+        self.entity_resolution_report: List[Dict[str, Any]] = []
+        self.possible_duplicate_pairs: List[Dict[str, Any]] = []
+
     # ---- node helpers ----
     def _ensure_node(self, node_id: str, node_type: str, label: str, **extra):
         if not self.graph.has_node(node_id):
@@ -186,7 +227,8 @@ class RelationshipGraphBuilder:
                                  case_ids=set(), roles=set(), **extra)
         return node_id
 
-    def add_person(self, name: str, role: Optional[str] = None, case_id: Optional[str] = None) -> Optional[str]:
+    def add_person(self, name: str, role: Optional[str] = None, case_id: Optional[str] = None,
+                    phone: Any = None, address: Any = None, vehicles: Optional[List[str]] = None) -> Optional[str]:
         name = normalize_name(name)
         if not name:
             return None
@@ -196,6 +238,22 @@ class RelationshipGraphBuilder:
             self.graph.nodes[node_id]["case_ids"].add(case_id)
         if role:
             self.graph.nodes[node_id]["roles"].add(role)
+
+        # feed the entity-resolution aggregator (optional phone/address/
+        # vehicles let alias merging use more than just name similarity)
+        attrs = self._person_attrs.setdefault(
+            name, {"phone": None, "address": None, "vehicles": set(), "case_id": case_id}
+        )
+        norm_phone = normalize_phone(phone)
+        if norm_phone and not attrs["phone"]:
+            attrs["phone"] = norm_phone
+        if address and not attrs["address"]:
+            attrs["address"] = str(address)
+        if vehicles:
+            attrs["vehicles"].update(vehicles)
+        if case_id and not attrs["case_id"]:
+            attrs["case_id"] = case_id
+
         return node_id
 
     def add_phone(self, phone: Any) -> Optional[str]:
@@ -272,14 +330,19 @@ class RelationshipGraphBuilder:
                           date=row.get("Date_Time_of_FIR"))
             role_nodes = {}
             for role, (name_c, phone_c, veh_c) in role_cols.items():
-                person = self.add_person(row.get(name_c), role, case_id)
+                veh_list = parse_vehicle_field(row.get(veh_c))
+                person = self.add_person(
+                    row.get(name_c), role, case_id,
+                    phone=row.get(phone_c), address=row.get("District"),
+                    vehicles=[v["plate"] for v in veh_list],
+                )
                 role_nodes[role] = person
                 if not person:
                     continue
                 self._link(person, f"CASE::{case_id}", f"INVOLVED_AS_{role}", case_id=case_id)
                 phone = self.add_phone(row.get(phone_c))
                 self._link(person, phone, "OWNS_PHONE", case_id=case_id)
-                for veh in parse_vehicle_field(row.get(veh_c)):
+                for veh in veh_list:
                     vnode = self.add_vehicle(veh["plate"], veh["description"])
                     self._link(person, vnode, "OWNS_VEHICLE", case_id=case_id)
 
@@ -335,6 +398,138 @@ class RelationshipGraphBuilder:
                        amount=row.get("Amount_INR"), timestamp=row.get("Transaction_DateTime"),
                        channel=row.get("Channel"))
 
+    # ---- ingestion: Subscriber Detail Records (SDR) ----
+    # THE FIX for phone numbers floating with no person attached: FIR
+    # ingestion only links a phone to a person when that number is the
+    # FIR's own Informant/Victim/Accused contact field. Every OTHER number
+    # a person's phone called (from Call_Recording.csv) had no name behind
+    # it. SDR is the actual "who owns this number" registry investigators
+    # use for exactly this -- so every phone node, including third-party
+    # call contacts, gets a PERSON node attached whenever SDR has a record
+    # for it.
+    def ingest_sdr_table(self, df: pd.DataFrame):
+        if df is None or df.empty:
+            return
+        phone_col = _find_column(df, [
+            "Mobile Number", "Phone Number", "Subscriber Mobile Number",
+            "MSISDN", "Contact Number", "Number",
+        ])
+        name_col = _find_column(df, [
+            "Subscriber Name", "Name", "Customer Name", "Registered Name", "Owner Name",
+        ])
+        case_col = _find_column(df, ["Case_ID", "Case Id", "FIR_No"])
+
+        if not phone_col or not name_col:
+            logger.warning(
+                "Subscriber_Detail_Records.csv is loaded but its phone/name "
+                "columns couldn't be identified (looked for phone in %s, "
+                "name in %s -- actual columns: %s). SDR phone-owner linking "
+                "skipped; add the real header names to the candidate lists "
+                "in _find_column() calls inside ingest_sdr_table().",
+                phone_col, name_col, list(df.columns),
+            )
+            return
+
+        for _, row in df.iterrows():
+            phone = self.add_phone(row.get(phone_col))
+            case_id = str(row.get(case_col)) if case_col else None
+            person = self.add_person(row.get(name_col), case_id=case_id, phone=row.get(phone_col))
+            if not phone or not person:
+                continue
+            self._link(person, phone, "REGISTERED_SUBSCRIBER_OF", case_id=case_id)
+
+    # ---- entity resolution / alias dedup (runs BEFORE cross-case linking,
+    #      so shared-identifier links connect through the merged canonical
+    #      person instead of missing because a suspect was split across
+    #      several misspelled PERSON nodes) ----
+    def resolve_person_aliases(self) -> List[Dict[str, Any]]:
+        """Runs entity_resolution.EntityResolver over every unique raw
+        person name seen during ingestion (FIR + SDR + Bank), merges
+        confirmed-alias PERSON nodes into one canonical node, and returns
+        an audit report of what was merged and why. Ambiguous pairs are
+        NOT auto-merged -- see resolver.possible_matches_for_review()."""
+        if not self._person_attrs:
+            return []
+
+        resolver = EntityResolver()
+        for name, attrs in self._person_attrs.items():
+            resolver.add_record(PersonRecord(
+                record_id=name,
+                name=name,
+                phone=attrs.get("phone"),
+                address=attrs.get("address"),
+                vehicles=sorted(attrs.get("vehicles") or []),
+                case_id=attrs.get("case_id"),
+            ))
+        self.resolved_entities = resolver.resolve()
+
+        report = []
+        for entity in self.resolved_entities:
+            if len(entity.member_record_ids) < 2:
+                continue  # nothing to merge for this person
+            canonical_node = f"PERSON::{entity.canonical_name}"
+            for alias_name in entity.member_record_ids:
+                alias_node = f"PERSON::{alias_name}"
+                if alias_node == canonical_node or not self.graph.has_node(alias_node):
+                    continue
+                self._merge_person_node(alias_node, canonical_node)
+            report.append({
+                "canonical_name": entity.canonical_name,
+                "aliases_merged": [a for a in entity.member_record_ids if a != entity.canonical_name],
+                "confidence": entity.confidence,
+                "evidence": [
+                    {"record_a": e.record_a, "record_b": e.record_b,
+                     "score": e.score, "features": e.features}
+                    for e in entity.evidence
+                ],
+            })
+
+        possible = resolver.possible_matches_for_review()
+        self.possible_duplicate_pairs = [
+            {
+                "name_a": p.record_a, "name_b": p.record_b,
+                "score": p.score, "features": p.features,
+            }
+            for p in possible
+        ]
+        if possible:
+            logger.info(
+                "%d name pair(s) flagged POSSIBLE_MATCH for investigator "
+                "review (not auto-merged): %s",
+                len(possible), [(p.record_a, p.record_b, p.score) for p in possible],
+            )
+        self.entity_resolution_report = report
+        if report:
+            logger.info("Entity resolution merged %d alias cluster(s).", len(report))
+        return report
+
+    def _merge_person_node(self, alias_node: str, canonical_node: str):
+        """Redirects every edge on alias_node onto canonical_node, unions
+        their case_ids/roles, records the merge, and removes alias_node."""
+        if not self.graph.has_node(canonical_node):
+            self.graph.add_node(canonical_node, type=NODE_TYPE_PERSON,
+                                 label=canonical_node.split("::", 1)[1],
+                                 case_ids=set(), roles=set())
+        c_attrs = self.graph.nodes[canonical_node]
+        a_attrs = self.graph.nodes[alias_node]
+        c_attrs["case_ids"] = c_attrs.get("case_ids", set()) | a_attrs.get("case_ids", set())
+        c_attrs["roles"] = c_attrs.get("roles", set()) | a_attrs.get("roles", set())
+        c_attrs.setdefault("merged_aliases", set()).add(a_attrs.get("label", alias_node))
+
+        for neighbor in list(self.graph.neighbors(alias_node)):
+            if neighbor == canonical_node:
+                continue
+            edge_attrs = self.graph[alias_node][neighbor]
+            if self.graph.has_edge(canonical_node, neighbor):
+                ce = self.graph[canonical_node][neighbor]
+                ce["weight"] = ce.get("weight", 1.0) + edge_attrs.get("weight", 1.0)
+                ce.setdefault("relation_types", set()).update(edge_attrs.get("relation_types", set()))
+                ce.setdefault("case_ids", set()).update(edge_attrs.get("case_ids", set()))
+                ce.setdefault("evidence", []).extend(edge_attrs.get("evidence", [])[:25])
+            else:
+                self.graph.add_edge(canonical_node, neighbor, **edge_attrs)
+        self.graph.remove_node(alias_node)
+
     # ---- cross-case identity resolution (the key "hidden network" step) ----
     def resolve_cross_case_links(self) -> List[Dict[str, Any]]:
         """For every shared identifier (phone / vehicle / account) touching
@@ -371,9 +566,11 @@ class RelationshipGraphBuilder:
     def build(self, tables: Optional[Dict[str, pd.DataFrame]] = None, base_dir: str = ".") -> nx.Graph:
         tables = tables or load_pipeline_tables(base_dir)
         self.ingest_fir_table(tables.get("fir", pd.DataFrame()))
+        self.ingest_sdr_table(tables.get("sdr", pd.DataFrame()))
         self.ingest_cdr_table(tables.get("cdr", pd.DataFrame()))
         self.ingest_fastag_table(tables.get("fastag", pd.DataFrame()))
         self.ingest_bank_table(tables.get("bank", pd.DataFrame()))
+        self.resolve_person_aliases()   # merge alias spellings BEFORE cross-case linking
         self.resolve_cross_case_links()
         return self.graph
 
@@ -453,21 +650,34 @@ def summarize_graph(graph: nx.Graph) -> Dict[str, Any]:
 # 6. TOP-LEVEL ENTRY POINT
 # ==========================================
 
-def build_relationship_graph(base_dir: str = ".", save: bool = True) -> Tuple[nx.Graph, List[Dict[str, Any]]]:
+ENTITY_RESOLUTION_REPORT_PATH = "entity_resolution_report.json"
+
+
+def build_relationship_graph(base_dir: str = ".", save: bool = True) -> Tuple[nx.Graph, List[Dict[str, Any]], Dict[str, Any]]:
     builder = RelationshipGraphBuilder()
     graph = builder.build(base_dir=base_dir)
+    entity_resolution = {
+        "merged_clusters": builder.entity_resolution_report,
+        "possible_duplicates": builder.possible_duplicate_pairs,
+    }
     if save:
         builder.save()
-    return graph, builder.cross_case_links
+        with open(ENTITY_RESOLUTION_REPORT_PATH, "w", encoding="utf-8") as f:
+            json.dump(entity_resolution, f, indent=2, default=str)
+    return graph, builder.cross_case_links, entity_resolution
 
 
 if __name__ == "__main__":
     print("==================================================================")
     print("            SIH RELATIONSHIP GRAPH BUILDER — STANDALONE RUN        ")
     print("==================================================================")
-    graph, links = build_relationship_graph()
+    graph, links, entity_resolution = build_relationship_graph()
     summary = summarize_graph(graph)
     print(json.dumps(summary, indent=2))
+
+    print(f"\nEntity resolution: {len(entity_resolution['merged_clusters'])} alias cluster(s) merged, "
+          f"{len(entity_resolution['possible_duplicates'])} pair(s) flagged for review.")
+    print(f"Entity resolution report saved to: {ENTITY_RESOLUTION_REPORT_PATH}")
 
     cross_case = [l for l in links if l["cross_case"]]
     print(f"\nCross-case suspect links found: {len(cross_case)}")
