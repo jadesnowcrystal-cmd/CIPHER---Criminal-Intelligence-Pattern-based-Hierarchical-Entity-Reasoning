@@ -1,741 +1,227 @@
-CIPHER --- AI-Powered Criminal Investigation & Digital Forensics Platform
+::: {align="center"}
 
-CIPHER is a modular, AI-assisted criminal intelligence and
-digital-forensics platform designed to help investigators connect
-fragmented evidence, discover hidden relationships, detect suspicious
-patterns, and organize case intelligence in one investigation
-workspace.
+CIPHER
 
-Problem Statement
+Criminal Intelligence & Pattern-based Hierarchical Entity Reasoning
 
-Criminal investigations involve fragmented information across FIR/case
-records, telecom data, vehicle intelligence, financial transactions,
-medical/forensic records, multimedia evidence, and legal/SOP documents.
-The core challenge is connecting these sources into meaningful
-investigative relationships.
+AI-Powered Criminal Investigation & Digital Forensics Platform
 
-Case → Person → Phone → Location → Vehicle → Bank Account
-     → Transaction → Other Person → Other Case
+Smart India Hackathon 2026 · Problem Statement 26189
 
-Solution
+Team Ino_vexX
 
-CIPHER provides an AI-powered investigation workstation that:
+:::
 
-Integrates heterogeneous investigative datasets
+ What is CIPHER?
 
-Resolves entities across records
+CIPHER is a modular, AI-assisted investigation platform that
+connects fragmented criminal-investigation data into one intelligence
+workflow.
 
-Builds relationship graphs
+ Connects people, phones, vehicles, accounts, locations and cases
 
-Performs network and anomaly analysis
+Detects patterns, anomalies and hidden relationships
 
-Correlates events through timelines and geospatial views
+Performs criminal-network and graph analysis
 
-Supports basic image and audio forensic analysis
+Correlates timelines and locations
 
-Provides legal/SOP retrieval through local RAG
+Supports basic image and audio forensics
 
-Produces explainable intelligence signals with confidence and
-evidence
+ Retrieves relevant legal/SOP information using RAG
 
-Keeps investigators in the decision loop
+Produces evidence-backed investigative signals
 
-Core Value Proposition
-
-CIPHER uniquely unifies FIR, telecom, financial, vehicle,
-geospatial, network intelligence, and multimedia forensics into one
-explainable, AI-assisted investigation platform.
+Fragmented Data → Connected Entities → Intelligence → Investigator
 
 Architecture
 
-FIR / CASE DATA
-       ↓
-INVESTIGATION PIPELINE
-       ↓
-┌────────────┬────────────┬────────────┐
-│  TELECOM   │  VEHICLE   │  FINANCIAL │
-│ SDR/CDR/   │ VAHAN/     │ BANK/UPI/  │
-│ IPDR       │ SARATHI/   │ MERCHANT/  │
-│            │ FASTag/ANPR│ CRYPTO     │
-└─────┬──────┴─────┬──────┴─────┬──────┘
-      └────────────┼────────────┘
-                   ↓
-          ENTITY RESOLUTION
-                   ↓
-          RELATIONSHIP GRAPH
-              (NetworkX)
-                   ↓
-      ┌────────────┼────────────┐
-      ↓            ↓            ↓
- NETWORK       INTELLIGENCE   TIMELINE &
- ANALYTICS       ENGINE       GEOSPATIAL
-      └────────────┼────────────┘
-                   ↓
-          INVESTIGATION WORKSPACE
+flowchart LR
+    A[FIR / Case Data] --> B[Investigation Pipeline]
+    B --> C[Telecom]
+    B --> D[Vehicle]
+    B --> E[Financial]
+    C --> F[Entity Resolution]
+    D --> F
+    E --> F
+    F --> G[Relationship Graph<br/>NetworkX]
+    G --> H[Network Analytics]
+    G --> I[Intelligence Engine]
+    G --> J[Timeline & Geospatial]
+    K[Image / Audio Evidence] --> L[Forensic Analysis]
+    M[Legal & SOP PDFs] --> N[RAG Pipeline]
+    H --> O[Investigator Workspace]
+    I --> O
+    J --> O
+    L --> O
+    N --> O
 
-MULTIMEDIA EVIDENCE ──→ FORENSIC MODULES
-LEGAL/SOP PDFs ──→ EMBEDDINGS → CHROMA → RAG
+Investigation Flow
 
-Core Modules
+Case → Extract → Resolve → Connect → Analyse → Correlate → Assist
 
-1. FIR & Crime Intelligence
+Key Modules
 
-The prototype supports FIR/case information such as:
+FIR & Case Intelligence
 
-FIR number
+Processes case information and provides the foundation for downstream
+investigation.
 
-District and police station
+Telecom Intelligence
 
-Case type and sections
+SDR, CDR and IPDR analysis for communication relationships and activity
+patterns.
 
-Place of occurrence
+Vehicle Intelligence
 
-Informant, victim and accused
+VAHAN, SARATHI, FASTag and ANPR correlation with people, locations and
+timestamps.
 
-Contact/address information
+Financial Intelligence
 
-Vehicle information
+Bank, UPI, merchant, cryptocurrency and related financial-record
+correlation.
 
-Case narrative
+Entity Resolution
 
-Vulnerability/connectivity indicators
+Fellegi-Sunter, Levenshtein, Jaro-Winkler, Soundex and Union-Find
+clustering with confidence/evidence scoring.
 
-Crime categories represented include women/children-related crime,
-violent crime, property crime, financial/cyber crime and organized
-crime.
+ Relationship & Network Analysis
 
-2. Telecom Intelligence
+NetworkX-based graphs with centrality, communities, bridges and
+relationship analysis.
 
-SDR
+Intelligence Engine
 
-Connects:
+Investigative signals for communication spikes, financial anomalies,
+contact chains, coordinated movement, repeated locations and ANPR
+mismatches.
 
-Person ↔ Phone Number
+Timeline & Geospatial Intelligence
 
-CDR
-
-Represents communication relationships:
-
-Person A ↔ Phone ↔ Person B
-
-IPDR
-
-Adds internet activity and time-based correlation.
-
-3. Vehicle Intelligence
-
-Integrates concepts from:
-
-VAHAN
-
-SARATHI
-
-FASTag
-
-ANPR
-
-Example:
-
-Person → Vehicle → FASTag Event → Location → Timestamp
-
-The intelligence engine can surface ANPR vehicle-information mismatch
-signals.
-
-4. Financial Intelligence
-
-The prototype connects financial entities through paths such as:
-
-Person → Bank Account → UPI → Merchant → Crypto Exchange → Blockchain Transaction → Corporate Entity
-
-Financial anomaly signals are generated using statistical behaviour.
-
-5. Entity Resolution
-
-The entity-resolution module includes:
-
-Normalization
-
-Soundex blocking
-
-Levenshtein similarity
-
-Jaro-Winkler similarity
-
-Fellegi-Sunter probabilistic record linkage
-
-Union-Find clustering
-
-Confidence scoring
-
-Evidence tracking
-
-Ambiguity surfaced for investigator review
-
-Entity-resolution results are investigative signals and require
-calibration before production use.
-
-6. Relationship Graph
-
-Built directly from CSV datasets using NetworkX.
-
-Node types
-
-PERSON
-
-PHONE
-
-VEHICLE
-
-ACCOUNT
-
-LOCATION
-
-CASE
-
-Canonical identifiers such as phone numbers, vehicle registrations and
-bank accounts can connect records across datasets.
-
-The graph is persisted as JSON and visualized using PyVis.
-
-7. Network Analytics
-
-The prototype calculates:
-
-Degree centrality
-
-Betweenness centrality
-
-Eigenvector centrality
-
-Community detection
-
-Bridge identification
-
-Network statistics
-
-Network prioritization/risk signals
-
-These scores are analytical signals, not legal findings.
-
-8. Intelligence Engine
-
-Current signals include:
-
-Communication spikes using z-scores
-
-Financial anomalies using z-scores
-
-Short contact chains such as A → B → C
-
-Coordinated movement around toll locations
-
-Repeated location loops
-
-ANPR mismatch alerts
-
-Alerts contain:
-
-Alert ID · Type · Severity · Score · Confidence · Summary · Entities · Evidence
-
-Severity levels:
-
-LOW · MEDIUM · HIGH · CRITICAL
-
-9. Timeline & Geospatial Intelligence
-
-Events can be correlated by:
-
-Case
-
-Date/time
-
-Event
-
-Person
-
-Location
-
-Source
-
-Risk/intelligence signal
-
-Geospatial views can include incident locations, toll plazas, ANPR
-cameras, telecom towers and financial counterparties.
-
-10. Multimedia Digital Forensics
-
-Audio --- BASIC
-
-Current implementation includes:
-
-SHA-256 evidence hash
-
-UTC timestamp
-
-Duration
-
-Sample rate
-
-Channels
-
-Speech/silence segmentation
-
-Mel spectrogram
-
-MFCC extraction
-
-JSON result persistence
-
-Technologies include Librosa, Pydub, NumPy and SoundFile.
-
-Speaker identity claims, speaker diarization and ENF matching are not
-part of the current basic implementation.
-
-Image --- BASIC
-
-Current implementation includes:
-
-SHA-256 evidence hash
-
-EXIF extraction
-
-GPS extraction
-
-Capture timestamp
-
-Camera make/model
-
-Software tag
-
-JPEG Error Level Analysis (ELA)
-
-JSON result persistence
-
-ELA is a heuristic and is not definitive proof of image manipulation.
-
-Advanced PRNU and JPEG DCT analysis are future scope.
-
-11. Legal & SOP RAG
-
-Legal PDFs
-   ↓
-PyMuPDFLoader
-   ↓
-RecursiveCharacterTextSplitter
-   ↓
-Ollama Embeddings
-   ↓
-Chroma
-   ↓
-Semantic Retrieval
-   ↓
-RAG Assistant
-
-Current configuration:
-
-Embedding model: nomic-embed-text
-
-Chunk size: 1500
-
-Overlap: 150
-
-Vector database: Chroma
-
-Local embedding runtime: Ollama
-
-12. FIR PDF Processing
-
-The prototype also includes a document-processing path using:
-
-PyPDF
-
-PyTesseract
-
-pdf2image
-
-Groq
-
-Llama 3.3 70B
-
-This supports extraction and structuring of information from
-unstructured FIR PDFs.
-
-Data & Storage
-
-CSV
-
-Representative datasets:
-
-complete_fir_dataset.csv
-Subscriber_Detail_Records.csv
-Call_Recording.csv
-IP_Detail_Records.csv
-Vehicle_Summary.csv
-VAHAN_Database.csv
-SARATHI_Database.csv
-FASTag_Toll_Logs.csv
-ANPR_Camera_Feeds.csv
-Financial_Summary.csv
-Bank_Statement_Records.csv
-
-JSON
-
-relationship_graph.json
-network_analytics_report.json
-intelligence_report.json
-Audio_Analysis_results.json
-Image_Analysis_results.json
-
-Other outputs
-
-network_map.html
-FINAL_GOVERNMENT_CASE_INVESTIGATION_REPORT.txt
-
-Case-level forensic results are stored under:
-
-case_analysis/<Case_ID>/
-
-Technology Stack
-
-Programming & Data
-
-Python
-
-Pandas
-
-NumPy
-
-Graph & Network Intelligence
-
-NetworkX
-
-PyVis
-
-AI / RAG
-
-LangChain
-
-Ollama
-
-Chroma
-
-nomic-embed-text
-
-Documents
-
-PyMuPDF
-
-PyPDF
-
-PyTesseract
-
-pdf2image
+Correlates events by time, person, case, location and source.
 
 Digital Forensics
 
-Pillow
+Image: EXIF, GPS metadata and JPEG ELA.
+Audio: segmentation, mel spectrograms, MFCCs and evidence hashing.
 
-ExifRead
+Legal & SOP RAG
 
-Librosa
+Retrieves relevant information from police manuals, SOPs and legal
+documents using a local RAG pipeline.
 
-Pydub
+Tech Stack
 
-SoundFile
+Layer                            Technologies
 
-Matplotlib
-
-AI-assisted FIR Processing
-
-Groq
-
-Llama 3.3 70B
-
-Visualization
-
-Plotly
-
-PyVis
-
-Project Structure
-
-CIPHER/
-├── main_investigation_pipeline.py
-├── sihrelationship.py
-├── sihentityresolution.py
-├── sihnetworkanalytics.py
-├── sihintelligenceengine.py
-├── sihaudioanalysis.py
-├── sihimageanalysis.py
-├── sihforensicanalysis.py
-├── sihindex.py
-├── sihsoprag.py
-├── sihdashboard.py
-│
-├── legal_docs/
-├── legal_vector_db/
-├── sample_evidence/
-├── case_analysis/
-├── data/
-│
-├── relationship_graph.json
-├── network_analytics_report.json
-├── intelligence_report.json
-├── network_map.html
-└── FINAL_GOVERNMENT_CASE_INVESTIGATION_REPORT.txt
-
-Exact files can vary by project version/branch.
+Language & Data              Python · Pandas · NumPy
+Graph & Network              NetworkX · PyVis
+AI / RAG                     LangChain · Ollama · Chroma · nomic-embed-text
+Documents                    PyMuPDF · PyPDF · PyTesseract · pdf2image
+Image Forensics              Pillow · ExifRead · NumPy
+Audio Forensics              Librosa · Pydub · SoundFile · Matplotlib
+AI-assisted FIR Processing   Groq · Llama 3.3 70B
+Visualization                Plotly · PyVis
 
 End-to-End Workflow
 
-Register / Load Case
-        ↓
-FIR Processing
-        ↓
-Investigation Data
-        ↓
-Telecom + Vehicle + Financial Correlation
-        ↓
-Entity Resolution
-        ↓
+FIR / Case
+    ↓
+Data Processing
+    ↓
+Entity Extraction & Resolution
+    ↓
 Relationship Graph
-        ↓
-Network Analytics
-        ↓
-Intelligence / Anomaly Detection
-        ↓
+    ↓
+Network + Intelligence Analysis
+    ↓
 Timeline + Geospatial Correlation
-        ↓
-Multimedia Forensics
-        ↓
+    ↓
+Forensic Analysis
+    ↓
 Legal / SOP RAG
-        ↓
-Investigator Review
-        ↓
-Investigation Report
+    ↓
+Investigator
 
-Synthetic Data
+ Example Investigation Relationship
 
-The current prototype primarily uses synthetic/development datasets for
-demonstration.
+Person
+  ├── Phone ──→ CDR / IPDR
+  ├── Vehicle ──→ FASTag / ANPR
+  ├── Account ──→ Bank / UPI
+  └── Location ──→ Timeline / Geo Analysis
+                         ↓
+                    Other Person / Case
 
-This enables testing of:
+CIPHER uses these relationships to support cross-source and cross-case
+investigation.
 
-Cross-source relationships
-
-Case linking
-
-Entity resolution
-
-Network analysis
-
-Anomaly detection
-
-Timeline correlation
-
-Forensic processing
-
-without requiring operational access to sensitive police databases.
-
-The investigation pipeline also supports registering a custom FIR/case
-and generating downstream intelligence without overwriting the
-demonstration dataset.
-
-Risk Assessment & Mitigation
-
-Risk                        Mitigation
-
-Data Privacy & Security     Encryption + Access Control
-Data Quality Issues         Data Cleaning + Validation
-False AI Predictions        Human-in-the-Loop Verification
-Entity Matching Errors      Entity Resolution + Confidence Scoring
-Integration Complexity      Standardized APIs + Data Formats
-Large Data Volumes          Modular Processing + Graph Analytics
-Legal / Compliance Issues   Legal & SOP Compliance
-Model Bias                  Bias Testing + Model Validation
-Cybersecurity Threats       Security Audits + Secure Access
-Limited Real-Time Data      Modular Data Connectors
-User Adoption               Investigator-Centric Training
-Scalability                 Modular & Scalable Infrastructure
-Evidence Integrity          Hashing + Audit Trail
-Explainability              Evidence-backed Intelligence Signals
-
-Responsible AI
+ Responsible AI
 
 CIPHER is an investigator-assistance system, not an autonomous
 decision-maker.
 
-Key principles:
+AI outputs are investigative signals, not legal conclusions.
 
-AI outputs are investigative signals.
+Confidence and evidence are retained where applicable.
 
-Confidence scores communicate uncertainty.
-
-Evidence accompanies generated alerts where available.
-
-Ambiguous entity matches are surfaced for review.
-
-Network scores are not legal conclusions.
+Ambiguous entity matches can be reviewed by investigators.
 
 Forensic heuristics are not treated as definitive proof.
 
-Sensitive data requires appropriate access controls.
-
-Legal/SOP answers should be grounded in authorized source documents.
-
-Human investigators remain responsible for interpretation and
-decisions.
-
-Research & Inspiration
-
-CIPHER was conceptually inspired by publicly documented Indian
-criminal-justice information systems and research in:
-
-Government / Indian Systems
-
-CCTNS --- Crime & Criminal Tracking Network & Systems
-
-ICJS --- Interoperable Criminal Justice System
-
-Maharashtra CID / CCTNS implementation
-
-Public Ministry of Home Affairs and PIB material
-
-Research Areas
-
-Criminal network analysis
-
-Graph embeddings
-
-Knowledge graphs
-
-Entity resolution
-
-Digital forensics
-
-Financial cybercrime investigation
-
-Explainable AI
-
-Human-in-the-loop AI
-
-Anomaly detection
-
-Multimedia forensics
-
-Privacy and responsible AI
-
-Key References
-
-Graph Embeddings in Criminal Investigation --- Springer
-
-Knowledge Graph-Based Digital Forensic Model for Criminal Network
-Analysis
-
-Deep Learning and Social Network-Based Forensic Data Mining
-
-Modular AI Framework for Financial Cybercrime Investigation
-
-AI, Cybercrime and Computer Forensics in the Indian Context
-
-Explainable AI for Digital Investigations
-
-The project uses these areas as research inspiration and does not claim
-to reproduce the architecture or capabilities of government systems.
-
-What Makes CIPHER Different?
-
-CIPHER combines multiple investigative intelligence layers into one
-workflow:
-
-FIR
- │
- ├── Telecom
- │
- ├── Vehicle
- │
- ├── Financial
- │
- ├── Geospatial
- │
- ├── Relationship Graph
- │
- ├── Network Analytics
- │
- ├── Intelligence Engine
- │
- ├── Multimedia Forensics
- │
- └── Legal / SOP RAG
-          ↓
-  Investigator Support
-
-Core uniqueness
-
-One investigation workspace connecting structured crime data,
-telecom, vehicles, finance, graph intelligence, geospatial evidence,
-multimedia forensics and legal/SOP knowledge.
+Real-world deployment requires appropriate authorization, privacy,
+security and legal controls.
 
 Future Scope
 
-Production-grade secure APIs
+Integration with ICJS pillars where legally authorized
 
-Legally authorized live data connectors
+Scalable graph infrastructure such as Neo4j / Spark
 
-Advanced graph machine learning
+GNN-based network pattern recognition
 
-Speaker diarization
+Advanced multimedia forensics
 
-Advanced audio forensics / ENF analysis
+Facial and biometric matching
 
-PRNU image analysis
+Real-time intelligence pipelines
 
-Advanced JPEG DCT analysis
+Production-grade security and access control
 
-Video forensic analysis
+📚 Research & Inspiration
 
-Chat/messaging forensic analysis
+CIPHER draws inspiration from publicly documented Indian
+criminal-justice systems such as CCTNS and ICJS, together with
+research in:
 
-Deepfake detection
+Criminal Network Analysis · Knowledge Graphs · Entity Resolution ·
+Digital Forensics · Explainable AI · Anomaly Detection
 
-Advanced geospatial trajectory analysis
+The prototype primarily uses synthetic/development data and does not
+claim to reproduce government systems.
 
-Real-time streaming intelligence
+ Project Status
 
-Calibrated ML risk models
+Type                            Working research/demo prototype
 
-Human feedback loops
+Data                            Primarily synthetic/development
+datasets
 
-Role-based investigation workflows
+Architecture                    Modular and extensible
 
-Immutable evidence audit trails
+Focus                           Criminal intelligence + network
+analysis + digital forensics
 
-Large-scale distributed data infrastructure
+::: {align="center"}
 
-Production authentication and authorization
-
-Disclaimer
-
-CIPHER is a prototype / research-oriented demonstration platform.
-
-Demonstration datasets are synthetic or development datasets unless
-explicitly stated otherwise.
-
-AI outputs, anomaly scores, entity-resolution results, network scores
-and forensic heuristics are intended to support investigation and
-prioritization. They should not be treated as automatic proof of
-criminal activity, legal findings, or a substitute for trained
-investigators, forensic experts or judicial processes.
-
-Deployment with real criminal-justice data would require appropriate
-authorization, security controls, privacy safeguards, legal review, data
-governance, validation and operational testing.
-
-Project Vision
+ Team Ino_vexX
 
 CIPHER
 
-Connect. Investigate. Correlate. Detect.
+Connect · Investigate · Correlate · Detect
 
-Transform fragmented investigative evidence into connected,
-explainable intelligence.
+Transforming fragmented investigation data into connected
+intelligence.
+:::
