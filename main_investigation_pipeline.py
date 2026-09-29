@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 # ==========================================
 # 1. CONSTANTS & MASTER DATABASES
 # ==========================================
-
 CAR_MAKES_MODELS = [
     ("Hyundai", "Creta"), ("Hyundai", "i20"), ("Tata", "Nexon"),
     ("Tata", "Harrier"), ("Maruti", "Swift"), ("Maruti", "Brezza"),
@@ -895,14 +894,17 @@ def generate_financial_intelligence(fir_cases, case_suspicious_map, append=False
             pan_company = generate_pan(is_company=True)
             gross_income = random.randint(300000, 1200000)
             sft_txns = random.randint(15000000, 40000000)
+            # BUG FIX: Guard against division by zero when gross_income is 0
+            # SECURITY TODO (Future): Add input validation for all financial values (min/max bounds)
+            income_ratio = round(sft_txns / gross_income, 1) if gross_income > 0 else 0.0
             itr_records.append({
                 "Case_ID": case_id, "Assessee_Name": company_name, "PAN": pan_company,
                 "Assessment_Year": "AY 2025-26", "ITR_Form": "ITR-6",
                 "Gross_Total_Income_INR": gross_income, "High_Value_SFT_Txns_INR": sft_txns,
-                "Income_to_SFT_Ratio": round(sft_txns / gross_income, 1),
-                "ITD_Risk_Rating": "CRITICAL" if sft_txns / gross_income > 15 else "MODERATE"
+                "Income_to_SFT_Ratio": income_ratio,
+                "ITD_Risk_Rating": "CRITICAL" if income_ratio > 15 else "MODERATE"
             })
-            if sft_txns / gross_income > 15:
+            if gross_income > 0 and sft_txns / gross_income > 15:
                 financial_anomalies.append({
                     "Case_ID": case_id, "Rule_Violated": "RULE 9: ITR / SFT INCOME MISMATCH (UNDISCLOSED INCOME)", "Severity": "HIGH",
                     "Person": f"{company_name} (linked entity)",
@@ -1702,26 +1704,26 @@ if __name__ == "__main__":
 
     print("[1/6] Generating 20 FIR cases with vehicle attributes...")
     fir_cases = generate_fir_dataset(count=20)
-    print("  └─ Saved: complete_fir_dataset.csv")
+    print(f"  |-> Saved: complete_fir_dataset.csv ({len(fir_cases)} cases)")
 
     print("[2/6] Generating Telecom Records (SDR, CDR, IPDR) & flagging CDR suspects...")
     sdr, cdr, ipdr, case_map = generate_telecom_data(fir_cases)
-    print("  └─ Saved: Subscriber_Detail_Records.csv, Call_Recording.csv, IP_Detail_Records.csv")
+    print("  |-> Saved: Subscriber_Detail_Records.csv, Call_Recording.csv, IP_Detail_Records.csv")
 
     print("[3/6] Running Multi-Rule Vehicle Intelligence Engine (VAHAN/SARATHI/FASTag/ANPR)...")
     vahan, sarathi, fastag, anpr, master_veh, vehicle_anomalies = generate_vehicle_intelligence_and_detect_anomalies(fir_cases, case_map)
-    print("  └─ Saved: Vehicle_Summary.csv, VAHAN_Database.csv, SARATHI_Database.csv, FASTag_Toll_Logs.csv, ANPR_Camera_Feeds.csv")
+    print("  |-> Saved: Vehicle_Summary.csv, VAHAN_Database.csv, SARATHI_Database.csv, FASTag_Toll_Logs.csv, ANPR_Camera_Feeds.csv")
 
     print("[4/6] Generating Financial & Cryptocurrency Intelligence (Bank/UPI/Merchant/Crypto/ITR/GST/CIBIL/RoC)...")
     financial_records, financial_anomalies, case_financial_map = generate_financial_intelligence(fir_cases, case_map)
-    print("  └─ Saved: Financial_Summary.csv, Bank_Statement_Records.csv, UPI_Payment_Gateway_Logs.csv,")
+    print("  |-> Saved: Financial_Summary.csv, Bank_Statement_Records.csv, UPI_Payment_Gateway_Logs.csv,")
     print("            Merchant_Gateway_Transaction_Logs.csv, Crypto_OnChain_Transactions.csv, Crypto_Exchange_KYC_Records.csv,")
     print("            Crypto_Exchange_OnOffRamp_Logs.csv, ITR_Forensic_Profile.csv, GST_EWayBill_Records.csv,")
     print("            CIBIL_Commercial_Credit_Report.csv, RoC_Shell_Company_Filings.csv")
 
     print("[5/6] Generating Medical & Forensic Examination Records (MLC/Autopsy/Toxicology/DNA/SAFE/etc.)...")
     medical_records, case_medical_map = generate_medical_forensic_intelligence(fir_cases, case_map)
-    print("  └─ Saved: Medical_Forensic_Summary.csv, MLC_Clinical_Assault_Reports.csv, PostMortem_Autopsy_Reports.csv,")
+    print("  |-> Saved: Medical_Forensic_Summary.csv, MLC_Clinical_Assault_Reports.csv, PostMortem_Autopsy_Reports.csv,")
     print("            Forensic_Toxicology_Reports.csv, DNA_Profiling_Reports.csv, SAFE_Reports.csv,")
     print("            Forensic_Odontology_Reports.csv, Skeletal_Identification_Reports.csv, Forensic_Psychiatric_Reports.csv")
 
@@ -1747,16 +1749,16 @@ if __name__ == "__main__":
         from sihnetworkanalytics import run_network_analytics
         from sihintelligenceengine import run_full_intelligence_analysis
 
-        graph, cross_case_links = build_relationship_graph()
+        graph, cross_case_links, graph_summary = build_relationship_graph()
         net_report = run_network_analytics(graph=graph)
         intel_report = run_full_intelligence_analysis()
 
-        print(f"  └─ relationship_graph.json         ({graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges)")
-        print(f"  └─ network_analytics_report.json   ({len(net_report['top_suspects'])} ranked suspects, "
+        print(f"  |-> relationship_graph.json         ({graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges)")
+        print(f"  |-> network_analytics_report.json   ({len(net_report['top_suspects'])} ranked suspects, "
               f"{net_report['summary']['critical_bridge_count']} bridges)")
-        print(f"  └─ network_map.html                 (interactive graph)")
-        print(f"  └─ intelligence_report.json        ({intel_report['meta']['alert_count']} alerts, "
+        print(f"  |-> network_map.html                 (interactive graph)")
+        print(f"  |-> intelligence_report.json        ({intel_report['meta']['alert_count']} alerts, "
               f"{intel_report['meta']['critical_or_high_alerts']} critical/high)")
-        print(f"  └─ cross-case suspect links found: {len([l for l in cross_case_links if l['cross_case']])}")
-    except ImportError as e:
-        print(f"\n[7/7] Skipped analysis modules (not found yet): {e}")
+        print(f"  |-> cross-case suspect links found: {len([l for l in cross_case_links if l.get('cross_case')])}")
+    except Exception as e:
+        print(f"\n[7/7] Skipped analysis modules (error): {e}")
