@@ -1,12 +1,2361 @@
+# File: sihfrontendtest.py
+
+import os
+import re
+import json
+import hashlib
+import logging
+import traceback
+import io
+import math
+import base64
+import inspect
+import mimetypes
+import threading
+from collections import Counter
+from datetime import datetime, date
+
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.utils
+from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
+from fastapi.staticfiles import StaticFiles
+import uvicorn
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("sihfrontendtest")
+
+# Initialize FastAPI App
+app = FastAPI(title="SIH Frontend Test Dashboard", version="2.0.0")
+
+# ==========================================
+# STATIC FILES (local Chart.js, etc.)
+# ==========================================
+# /static on disk -> served at the URL path /static/...
+# e.g. /static/js/chart.umd.min.js is on disk at ./static/js/chart.umd.min.js
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_STATIC_DIR = os.path.join(_BASE_DIR, "static")
+os.makedirs(os.path.join(_STATIC_DIR, "js"), exist_ok=True)
+os.makedirs(os.path.join(_STATIC_DIR, "leaflet"), exist_ok=True)
+
+
+def ensure_leaflet_assets():
+    """Vendors Leaflet's JS/CSS into ./static/leaflet/ so the map works on
+    networks that can't reach any CDN (unpkg.com, cdnjs.cloudflare.com --
+    both were unreachable in this deployment). Runs once, on startup, and
+    is a no-op every time after the files are actually present. If this
+    machine also has no internet access, it logs a warning and the map
+    shows a clear "files missing" message client-side (see
+    sihfrontendtest.py's initCaseLocationMap) instead of silently failing.
+    """
+    js_path = os.path.join(_STATIC_DIR, "leaflet", "leaflet.js")
+    css_path = os.path.join(_STATIC_DIR, "leaflet", "leaflet.css")
+    if os.path.exists(js_path) and os.path.exists(css_path):
+        return
+    try:
+        import urllib.request
+        urls = {
+            js_path: "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
+            css_path: "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css",
+        }
+        for path, url in urls.items():
+            if not os.path.exists(path):
+                urllib.request.urlretrieve(url, path)
+        logger.info("Leaflet assets vendored into static/leaflet/")
+    except Exception:
+        logger.warning(
+            "Could not download Leaflet assets (no internet access from this "
+            "server either). Place leaflet.js and leaflet.css manually under "
+            "%s -- download them from https://leafletjs.com/download.html on "
+            "a machine that does have internet access, then copy them over.",
+            os.path.join(_STATIC_DIR, "leaflet"),
+        )
+
+
+def ensure_chartjs_zoom_asset():
+    """Vendors chartjs-plugin-zoom (the Chart.js zoom/pan plugin) into
+    ./static/js/ the same way ensure_leaflet_assets() vendors Leaflet --
+    this deployment can't reach unpkg.com/cdnjs.cloudflare.com at runtime,
+    so the UMD build is downloaded once (when the server *does* have
+    internet access) and served locally forever after. Powers the zoom
+    in / zoom out / reset controls on the Interactive Multi-Event
+    Chronology Chart (see chronologyChart in dashboard-integration.js)."""
+    js_path = os.path.join(_STATIC_DIR, "js", "chartjs-plugin-zoom.umd.min.js")
+    if os.path.exists(js_path):
+        return
+    try:
+        import urllib.request
+        urllib.request.urlretrieve(
+            "https://unpkg.com/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js",
+            js_path,
+        )
+        logger.info("chartjs-plugin-zoom vendored into static/js/")
+    except Exception:
+        logger.warning(
+            "Could not download chartjs-plugin-zoom (no internet access from "
+            "this server either). Place chartjs-plugin-zoom.umd.min.js manually "
+            "under %s -- download it from "
+            "https://www.jsdelivr.com/package/npm/chartjs-plugin-zoom on a "
+            "machine that does have internet access, then copy it over. Until "
+            "then the chart still renders, just without zoom/pan.",
+            js_path,
+        )
+
+
+ensure_leaflet_assets()
+ensure_chartjs_zoom_asset()
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+# ==========================================
+# 1. ANALYTICAL & PIPELINE DATA LAYER
+# ==========================================
+#
+# sihdashboard.py (Streamlit) gets its data because Streamlit itself calls
+# generate_base_pipeline_data(...) on every page load, which WRITES the CSVs
+# (complete_fir_dataset.csv, CDR/ANPR/bank CSVs, etc.) to disk before anything
+# tries to read them back. This FastAPI version never did that step — it went
+# straight to build_relationship_graph()/load_pipeline_tables(), which read
+# files that may not exist yet, hit an exception, and silently fell back to
+# empty stub data (the `except Exception: pass` swallowed the real error).
+# On top of that, the six /api/* routes below never even called
+# get_analytics_data() — they just returned hardcoded sample JSON. That's why
+# nothing from the real pipeline was showing up.
+#
+# Fixes:
+#   1. ensure_pipeline_data() generates the base synthetic dataset once, on
+#      startup, if the CSVs aren't already on disk (mirrors sihdashboard's
+#      generate_base_pipeline_data).
+#   2. get_analytics_data() actually runs the graph/network/intel pipeline
+#      and is cached in-memory (rebuilding the graph on every request is
+#      expensive) with a /api/refresh route to force a rebuild.
+#   3. Errors are logged with a full traceback instead of swallowed, so a
+#      real failure shows up in the console instead of quietly producing
+#      empty data.
+#   4. Every /api/* route below now reads from that real cached data.
+
+from fastapi import Body
+
+from main_investigation_pipeline import (
+    generate_fir_dataset,
+    generate_telecom_data,
+    generate_vehicle_intelligence_and_detect_anomalies,
+    generate_financial_intelligence,
+    generate_unified_investigation_report,
+    register_custom_fir,
+    BNS_CRIME_DATABASE,
+    DISTRICTS,
+    NON_MEDIA_FORENSIC_UNDER_CONSTRUCTION,
+    MULTIMEDIA_FORENSIC_UNDER_CONSTRUCTION,
+)
+from sihrelationship import build_relationship_graph, load_pipeline_tables, normalize_name
+from sihnetworkanalytics import run_network_analytics
+from sihintelligenceengine import run_full_intelligence_analysis
+
+# sihtimeline.py's TimelineCorrelationEngine has real logic (build_case_timeline)
+# that doesn't touch Streamlit at all -- only its module-level render_*_page()
+# functions do. Importing the module still executes `import streamlit as st`
+# at its top, though, so this needs streamlit installed even though nothing
+# here renders through it.
+try:
+    from sihtimeline import TimelineCorrelationEngine
+except ImportError:
+    TimelineCorrelationEngine = None
+
+# sihsoprag.py's run_query()/get_context_and_docs()/format_numbered_context()
+# are plain functions with no Streamlit dependency -- only load_components()
+# and render_sidebar_sop_rag() touch `st`. So the FastAPI /api/assistant/ask
+# route below reuses run_query() directly and builds its own
+# vectorstore/llm once (mirroring load_components(), just without the
+# @st.cache_resource decorator, which needs a running Streamlit script
+# context this server doesn't have).
+try:
+    from sihsoprag import (
+        VECTOR_DB_DIR as SOP_VECTOR_DB_DIR,
+        EMBED_MODEL as SOP_EMBED_MODEL,
+        LLM_MODEL as SOP_LLM_MODEL,
+        run_query as sop_run_query,
+    )
+    from langchain_chroma import Chroma as _SopChroma
+    from langchain_ollama import OllamaEmbeddings as _SopOllamaEmbeddings, ChatOllama as _SopChatOllama
+except ImportError:
+    sop_run_query = None
+
+
+# Multimedia Digital Forensic analyzers (Chats / Video / Audio / Image).
+# Same analyze_*_file functions sihdashboard.py's Report Analysis page uses.
+# Each import is guarded on its own so a missing module (or its optional
+# deps: ffmpeg, librosa, PIL...) only disables that one module in the UI
+# instead of stopping the whole server.
+FORENSIC_IMPORT_ERRORS = {}
+
+analyze_chat_file = generate_fixture_db = None
+analyze_video_file = generate_video_fixture = None
+analyze_image_file = generate_image_fixture = None
+analyze_audio_basic = None
+get_or_create_fixture = _FixtureFile = None
+
+try:
+    from sihchatsanalysis import analyze_chat_file, generate_fixture_db
+except Exception as _e:
+    FORENSIC_IMPORT_ERRORS["Chats Analysis"] = str(_e)
+try:
+    from sihvideoanalysis import analyze_video_file, generate_video_fixture
+except Exception as _e:
+    FORENSIC_IMPORT_ERRORS["Video Analysis"] = str(_e)
+try:
+    from sih_audio_analysis import analyze_audio_basic
+except Exception as _e:
+    FORENSIC_IMPORT_ERRORS["Audio Analysis"] = str(_e)
+try:
+    from sihimageanalysis import analyze_image_file, generate_image_fixture
+except Exception as _e:
+    FORENSIC_IMPORT_ERRORS["Image Analysis"] = str(_e)
+try:
+    # only needed for the "Use Sample Evidence" buttons
+    from sihforensicanalysis import get_or_create_fixture, _FixtureFile
+except Exception as _e:
+    FORENSIC_IMPORT_ERRORS["_fixtures"] = str(_e)
+
+_SOP_RAG_CACHE = {"vectorstore": None, "llm": None, "error": None}
+
+
+def get_sop_rag_components():
+    """Lazily builds (and caches in-process) the embeddings/vectorstore/LLM
+    sihsoprag.py's SOP/legal RAG assistant needs -- same models and same
+    ./legal_vector_db persisted Chroma store sihsoprag.py's sidebar widget
+    uses, so results stay identical between the Streamlit sidebar and this
+    FastAPI route. Returns (vectorstore, llm, error_message)."""
+    if sop_run_query is None:
+        return None, None, "sihsoprag.py could not be imported."
+    if _SOP_RAG_CACHE["vectorstore"] is None and _SOP_RAG_CACHE["error"] is None:
+        try:
+            embeddings = _SopOllamaEmbeddings(model=SOP_EMBED_MODEL)
+            vectorstore = _SopChroma(persist_directory=SOP_VECTOR_DB_DIR, embedding_function=embeddings)
+            llm = _SopChatOllama(model=SOP_LLM_MODEL)
+            _SOP_RAG_CACHE["vectorstore"] = vectorstore
+            _SOP_RAG_CACHE["llm"] = llm
+        except Exception:
+            logger.error("Failed to load SOP/Legal RAG components:\n%s", traceback.format_exc())
+            _SOP_RAG_CACHE["error"] = (
+                "Could not connect to the SOP/legal knowledge base (Ollama/Chroma). "
+                "Check that Ollama is running and the legal_vector_db exists."
+            )
+    return _SOP_RAG_CACHE["vectorstore"], _SOP_RAG_CACHE["llm"], _SOP_RAG_CACHE["error"]
+
+PIPELINE_NUM_CASES = int(os.environ.get("SIH_NUM_CASES", 20))
+
+# In-memory cache so we don't rebuild the graph/analytics on every single
+# request (each of these calls does real work — networkx centrality,
+# community detection, statistical anomaly scans, etc.)
+_ANALYTICS_CACHE = {"data": None, "version": 0}
+_ANALYTICS_LOCK = threading.RLock()
+
+# Derived, JSON-ready responses (overview, persons, alerts, timeline...) are
+# memoised per analytics "version". Every rebuild bumps the version, which
+# invalidates all of them at once. Before this, each tab click re-ran the
+# same pandas / networkx work on the server.
+_RESPONSE_CACHE = {}
+
+
+def cached_response(key, builder):
+    ver = _ANALYTICS_CACHE["version"]
+    hit = _RESPONSE_CACHE.get(key)
+    if hit is not None and hit[0] == ver:
+        return hit[1]
+    value = builder()
+    _RESPONSE_CACHE[key] = (ver, value)
+    return value
+
+
+_CSV_CACHE = {}
+
+
+def read_csv_cached(path):
+    """pd.read_csv keyed on (path, mtime) so an unchanged file is parsed once."""
+    mtime = os.path.getmtime(path)
+    hit = _CSV_CACHE.get(path)
+    if hit is not None and hit[0] == mtime:
+        return hit[1]
+    df = pd.read_csv(path)
+    _CSV_CACHE[path] = (mtime, df)
+    return df
+
+
+def case_type_category(case_type: str) -> str:
+    """Same lookup sihdashboard.py uses to bucket a Case_Type into a
+    top-level category (Women/Children, Violent, Property, Other...)."""
+    return BNS_CRIME_DATABASE.get(case_type, {}).get("category", "Other")
+
+
+def person_node_id(name):
+    """Same helper as sihdashboard.py's person_node_id(): maps a raw name to
+    the relationship graph's PERSON:: node id (after sihrelationship.py's
+    normalize_name(), which is itself entity-resolution-aware per
+    sihentityresolution.py's INTEGRATION POINT), so degree/connections can be
+    looked up for the Persons & Witnesses tab."""
+    n = normalize_name(name)
+    return f"PERSON::{n}" if n else None
+
+
+# ==========================================
+# GEOGRAPHY — Mumbai & Navi Mumbai anchor points + deterministic fallback
+# Ported from sihdashboard.py so the Case Location / Cross-Jurisdictional
+# Links map on this page can place FIRs and their linked FASTag/ANPR/
+# telecom/bank records without needing Streamlit or Plotly.
+# ==========================================
+MAP_CENTER = {"lat": 19.0330, "lon": 73.0297}
+MAP_DEFAULT_ZOOM = 11
+
+KNOWN_LOCATIONS = {
+    "thane": (19.2183, 72.9781), "panvel": (18.9894, 73.1175),
+    "belapur": (19.0176, 73.0357), "seawoods": (19.0187, 73.0175),
+    "khandeshwar": (19.0245, 73.0680), "kharghar": (19.0474, 73.0669),
+    "airoli": (19.1550, 72.9986), "kalyan": (19.2437, 73.1355),
+    "nerul": (19.0330, 73.0297), "vashi": (19.0771, 72.9986),
+    "dadar": (19.0184, 72.8425), "andheri": (19.1197, 72.8697),
+    "lower parel": (19.0000, 72.8300), "vashi toll plaza": (19.0700, 72.9990),
+    "khalapur": (18.7906, 73.2907), "urse": (18.7300, 73.5390),
+    "khed toll plaza": (18.0167, 73.3833), "mumbai": (19.0760, 72.8777),
+    "navi mumbai": (19.0330, 73.0297),
+}
+LAT_RANGE, LON_RANGE = (18.90, 19.25), (72.85, 73.15)
+
+CATEGORY_COLORS = {
+    "Women/Children": "#ec4899", "Violent": "#ef4444", "Property": "#f59e0b",
+    "Financial": "#8b5cf6", "Cyber": "#3b82f6", "Organized": "#f97316",
+    "State/Terror": "#7f1d1d", "Other": "#64748b",
+}
+LINKED_SOURCE_COLORS = {
+    "FASTag / Toll": "#10b981", "ANPR Camera": "#22c55e",
+    "Telecom Tower": "#3b82f6", "Bank Counterparty": "#a855f7",
+}
+
+
+def geo_for(place_name: str, salt: str = "") -> "tuple[float, float]":
+    """Deterministic lat/lon for a place name: snaps to a known Mumbai/Navi
+    Mumbai anchor when recognizable, otherwise scatters within the region's
+    bounding box. Same logic as sihdashboard.py's geo_for()."""
+    key = str(place_name or "unknown").strip().lower()
+    base = None
+    for known, coords in KNOWN_LOCATIONS.items():
+        if known in key or key in known:
+            base = coords
+            break
+    if base is None:
+        h = int(hashlib.md5(key.encode()).hexdigest(), 16)
+        base = (
+            LAT_RANGE[0] + (h % 1000) / 1000 * (LAT_RANGE[1] - LAT_RANGE[0]),
+            LON_RANGE[0] + ((h // 1000) % 1000) / 1000 * (LON_RANGE[1] - LON_RANGE[0]),
+        )
+    jseed = int(hashlib.md5(f"{key}{salt}".encode()).hexdigest(), 16)
+    jlat = ((jseed % 240) - 120) / 100000.0 * 5
+    jlon = (((jseed // 240) % 240) - 120) / 100000.0 * 5
+    return base[0] + jlat, base[1] + jlon
+
+
+def parse_gps_string(raw):
+    """Parses ANPR's '19.0596 N, 72.9011 E' style coordinate strings."""
+    m = re.match(r"\s*([\d.]+)\s*N\s*,\s*([\d.]+)\s*E\s*", str(raw))
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    return None
+
+
+def ensure_pipeline_data(num_cases: int = PIPELINE_NUM_CASES):
+    """Generates the synthetic FIR/CDR/vehicle/bank batch if it isn't
+    already on disk. Equivalent to sihdashboard.py's
+    generate_base_pipeline_data(), just without the Streamlit cache
+    decorator. Safe to call repeatedly — it's a no-op once the CSVs exist."""
+    if os.path.exists("complete_fir_dataset.csv"):
+        return
+    logger.info("No pipeline CSVs found on disk — generating a base batch of %s cases...", num_cases)
+    fir_cases = generate_fir_dataset(count=num_cases)
+    sdr, cdr, ipdr, case_map = generate_telecom_data(fir_cases)
+    vahan, sarathi, fastag, anpr, master_veh, vehicle_anomalies = \
+        generate_vehicle_intelligence_and_detect_anomalies(fir_cases, case_map)
+    financial_records, financial_anomalies, case_financial_map = \
+        generate_financial_intelligence(fir_cases, case_map)
+    all_anomalies = vehicle_anomalies + financial_anomalies
+    generate_unified_investigation_report(
+        fir_cases, cdr, case_map, master_veh, all_anomalies, financial_records, case_financial_map
+    )
+    logger.info("Base pipeline data generated.")
+
+
+def build_analytics_from_disk():
+    """Rebuilds the relationship graph / network analytics / intelligence
+    report from whatever is currently on disk. Mirrors
+    sihdashboard.py's build_analytics_from_disk()."""
+    graph, cross_case_links, entity_resolution = build_relationship_graph(base_dir=".")
+    net_report = run_network_analytics(graph=graph, base_dir=".")
+    intel_report = run_full_intelligence_analysis(base_dir=".")
+    tables = load_pipeline_tables(".")
+
+    fir_df = pd.read_csv("complete_fir_dataset.csv") if os.path.exists("complete_fir_dataset.csv") else pd.DataFrame()
+
+    return {
+        "graph": graph,
+        "cross_case_links": cross_case_links,
+        "entity_resolution": entity_resolution or {"merged_clusters": [], "possible_duplicates": []},
+        "net_report": net_report or {},
+        "intel_report": intel_report or {},
+        "tables": tables or {},
+        "fir_df": fir_df,
+        "fir_cases": fir_df.to_dict("records") if not fir_df.empty else [],
+    }
+
+
+def get_analytics_data(force_refresh: bool = False):
+    """Returns the cached analytics bundle, building it (and generating the
+    base dataset first, if needed) on first call or when force_refresh=True.
+
+    Thread-safe: rebuilds are serialised by a lock and readers never wait on
+    one once a cached bundle exists (they keep getting the previous bundle
+    until the new one is swapped in). If a *refresh* fails, the previous good
+    bundle is kept instead of being replaced with an empty stub."""
+    if not force_refresh and _ANALYTICS_CACHE["data"] is not None:
+        return _ANALYTICS_CACHE["data"]
+    with _ANALYTICS_LOCK:
+        if not force_refresh and _ANALYTICS_CACHE["data"] is not None:
+            return _ANALYTICS_CACHE["data"]
+        try:
+            ensure_pipeline_data()
+            built = build_analytics_from_disk()
+        except Exception:
+            logger.error("Failed to build analytics data:\n%s", traceback.format_exc())
+            if _ANALYTICS_CACHE["data"] is not None:
+                return _ANALYTICS_CACHE["data"]
+            built = {
+                "graph": None,
+                "cross_case_links": [],
+                "entity_resolution": {"merged_clusters": [], "possible_duplicates": []},
+                "net_report": {"summary": {"total_nodes": 0, "total_edges": 0, "critical_bridge_count": 0}},
+                "intel_report": {"meta": {"alert_count": 0, "critical_or_high_alerts": 0}, "alerts": []},
+                "tables": {},
+                "fir_df": pd.DataFrame(),
+                "fir_cases": [],
+            }
+        _ANALYTICS_CACHE["data"] = built
+        _ANALYTICS_CACHE["version"] += 1
+        _RESPONSE_CACHE.clear()
+    return _ANALYTICS_CACHE["data"]
+
+
+@app.on_event("startup")
+async def _load_pipeline_on_startup():
+    # Build once at server start so the first request isn't slow and so any
+    # import/pipeline error is printed immediately instead of hiding inside
+    # the first API call.
+    get_analytics_data(force_refresh=True)
+
+
+# ==========================================
+# 2. REST API ENDPOINTS
+# ==========================================
+# Every route below reads from the real cached pipeline data instead of
+# hardcoded sample JSON.
+
+@app.post("/api/refresh")
+def refresh_pipeline():
+    """Regenerates a fresh synthetic batch and rebuilds analytics from it —
+    the API equivalent of sihdashboard's sidebar 'Regenerate dataset' button."""
+    for f in ["complete_fir_dataset.csv"]:
+        pass  # base CSVs are intentionally left in place; delete manually to force a brand-new batch
+    data = get_analytics_data(force_refresh=True)
+    return {"status": "ok", "total_cases": len(data["fir_cases"])}
+
+
+@app.get("/api/overview")
+def get_overview():
+    get_analytics_data()
+    return cached_response(("overview",), _build_overview)
+
+
+def _build_overview():
+    data = get_analytics_data()
+    fir_df = data["fir_df"]
+    net_report = data["net_report"]
+
+    if not fir_df.empty and "Case_Type" in fir_df.columns:
+        categories = fir_df["Case_Type"].apply(case_type_category)
+    else:
+        categories = pd.Series(dtype=str)
+
+    if not fir_df.empty and "Date_Time_of_FIR" in fir_df.columns:
+        months = pd.to_datetime(fir_df["Date_Time_of_FIR"], errors="coerce").dt.strftime("%b")
+        trend_counts = Counter(months.dropna())
+        crime_trend = [{"date": m, "count": c} for m, c in trend_counts.items()]
+    else:
+        crime_trend = []
+
+    vuln_counts = Counter()
+    if not fir_df.empty and "Vulnerability_Category" in fir_df.columns:
+        vuln_counts = Counter(fir_df["Vulnerability_Category"].dropna().astype(str))
+    women_cases = sum(v for k, v in vuln_counts.items() if "women" in k.lower())
+    children_cases = sum(v for k, v in vuln_counts.items() if "child" in k.lower())
+    elder_cases = sum(
+        v for k, v in vuln_counts.items()
+        if "elder" in k.lower() or "senior" in k.lower() or "old age" in k.lower()
+    )
+
+    return {
+        "stats": {
+            "total_fir": int(len(fir_df)),
+            "total_entities": int(net_report.get("summary", {}).get("total_nodes", 0)),
+            "total_links": int(net_report.get("summary", {}).get("total_edges", 0)),
+            "critical_bridges": int(net_report.get("summary", {}).get("critical_bridge_count", 0)),
+        },
+        "pending_tasks": [],
+        "crime_trend": crime_trend,
+        "crime_category_breakdown": dict(Counter(categories)) if len(categories) else {},
+        "crime_against_women": {"cases": int(women_cases)},
+        "crime_against_children": {"cases": int(children_cases)},
+        "crime_against_elders": {"cases": int(elder_cases)},
+    }
+
+
+@app.get("/api/case-locations")
+def get_case_locations():
+    """FIR case pins for the dashboard's Case Location map (Mumbai & Navi
+    Mumbai), same construction as sihdashboard.py's map_df."""
+    get_analytics_data()
+    return cached_response(("case-locations",), _build_case_locations)
+
+
+def _build_case_locations():
+    data = get_analytics_data()
+    fir_df = data["fir_df"]
+    rows = []
+    if not fir_df.empty:
+        for _, c in fir_df.iterrows():
+            fir_no = str(c.get("FIR_No", ""))
+            if not fir_no:
+                continue
+            lat, lon = geo_for(c.get("Place_of_Occurrence", "Mumbai"), salt=fir_no)
+            case_type = c.get("Case_Type", "")
+            rows.append({
+                "fir_no": fir_no,
+                "case_type": case_type,
+                "category": case_type_category(case_type),
+                "district": c.get("District", ""),
+                "police_station": c.get("Police_Station", ""),
+                "io_name": c.get("Investigating_Officer_Name", ""),
+                "vulnerability_category": c.get("Vulnerability_Category", ""),
+                "lat": lat, "lon": lon,
+            })
+    return {
+        "center": MAP_CENTER, "zoom": MAP_DEFAULT_ZOOM,
+        "cases": rows, "category_colors": CATEGORY_COLORS,
+    }
+
+
+@app.get("/api/case-links/{fir_no:path}")
+def get_case_links(fir_no: str):
+    """Cross-jurisdictional links (FASTag/toll, ANPR camera, telecom tower,
+    bank counterparty) for a single FIR, same source tables and geocoding
+    sihdashboard.py uses to draw the highlighted lines on selection."""
+    get_analytics_data()
+    return cached_response(("case-links", fir_no), lambda: _build_case_links(fir_no))
+
+
+def _build_case_links(fir_no: str):
+    data = get_analytics_data()
+    fir_df = data["fir_df"]
+    tables = data.get("tables", {}) or {}
+
+    sel_row = pd.DataFrame()
+    if not fir_df.empty and "FIR_No" in fir_df.columns:
+        sel_row = fir_df[fir_df["FIR_No"].astype(str) == fir_no]
+    if sel_row.empty:
+        return {"fir_no": fir_no, "case_point": None, "links": [], "link_colors": LINKED_SOURCE_COLORS}
+
+    place = sel_row.iloc[0].get("Place_of_Occurrence", "Mumbai")
+    s_lat, s_lon = geo_for(place, salt=fir_no)
+
+    linked = []
+
+    fastag_df = tables.get("fastag", pd.DataFrame())
+    if isinstance(fastag_df, pd.DataFrame) and not fastag_df.empty and "Case_ID" in fastag_df.columns:
+        for _, r in fastag_df[fastag_df["Case_ID"].astype(str) == fir_no].iterrows():
+            plaza = str(r.get("Toll Plaza ID & Location", "Toll Plaza")).split("/")[-1].strip()
+            p_lat, p_lon = geo_for(plaza, salt=fir_no)
+            linked.append({"type": "FASTag / Toll", "label": plaza, "lat": p_lat, "lon": p_lon})
+
+    anpr_df = read_csv_cached("ANPR_Camera_Feeds.csv") if os.path.exists("ANPR_Camera_Feeds.csv") else pd.DataFrame()
+    if not anpr_df.empty and "Case_ID" in anpr_df.columns:
+        for _, r in anpr_df[anpr_df["Case_ID"].astype(str) == fir_no].iterrows():
+            gps = parse_gps_string(r.get("GPS Coordinates", ""))
+            loc = str(r.get("Camera ID & Location", "ANPR Camera")).split("/")[-1].strip()
+            if gps:
+                linked.append({"type": "ANPR Camera", "label": loc, "lat": gps[0], "lon": gps[1]})
+
+    cdr_df = tables.get("cdr", pd.DataFrame())
+    if isinstance(cdr_df, pd.DataFrame) and not cdr_df.empty and "Case_ID" in cdr_df.columns:
+        towers = set()
+        for _, r in cdr_df[cdr_df["Case_ID"].astype(str) == fir_no].iterrows():
+            towers.add(str(r.get("First Tower Location", "")))
+            towers.add(str(r.get("Last Tower Location", "")))
+        for tw in list(towers)[:6]:
+            if tw and tw.lower() != "nan":
+                t_lat, t_lon = geo_for(tw, salt=fir_no)
+                linked.append({"type": "Telecom Tower", "label": tw, "lat": t_lat, "lon": t_lon})
+
+    bank_df = tables.get("bank", pd.DataFrame())
+    if isinstance(bank_df, pd.DataFrame) and not bank_df.empty and "Case_ID" in bank_df.columns:
+        seen_cp = set()
+        for _, r in bank_df[bank_df["Case_ID"].astype(str) == fir_no].iterrows():
+            cp = str(r.get("Counterparty_Name", ""))
+            if cp and cp not in seen_cp:
+                seen_cp.add(cp)
+                b_lat, b_lon = geo_for(cp, salt=fir_no)
+                linked.append({"type": "Bank Counterparty", "label": cp, "lat": b_lat, "lon": b_lon})
+            if len(seen_cp) >= 5:
+                break
+
+    return {
+        "fir_no": fir_no,
+        "case_point": {"lat": s_lat, "lon": s_lon},
+        "links": linked,
+        "link_colors": LINKED_SOURCE_COLORS,
+    }
+
+
+@app.get("/api/network")
+def get_network(full: bool = False):
+    """The dashboard only needs the summary / top suspects / bridges /
+    communities / district counts. The full node+edge dump used to be sent on
+    every call (twice per Investigation visit) although nothing reads it, so
+    it is now opt-in via ?full=true."""
+    get_analytics_data()
+    return cached_response(("network", bool(full)), lambda: _build_network(bool(full)))
+
+
+def _normalise_communities(raw):
+    """Accepts a list or a {id: members} dict and returns [{id, members, size}]."""
+    if not raw:
+        return []
+    out = []
+    items = raw.items() if isinstance(raw, dict) else enumerate(raw)
+    for cid, c in items:
+        if isinstance(c, dict):
+            members = c.get("members") or c.get("nodes") or []
+            size = c.get("size") or (len(members) if hasattr(members, "__len__") else 0)
+        else:
+            members = list(c) if hasattr(c, "__iter__") and not isinstance(c, str) else []
+            size = len(members)
+        out.append({"id": cid, "size": int(size or 0), "members": int(size or 0)})
+    return out
+
+
+def _build_network(full: bool):
+    data = get_analytics_data()
+    graph = data["graph"]
+    net_report = data["net_report"]
+    fir_df = data["fir_df"]
+
+    nodes, edges = [], []
+    if full and graph is not None:
+        for node_id, attrs in graph.nodes(data=True):
+            nodes.append({
+                "id": node_id,
+                "label": attrs.get("label", str(node_id).split("::")[-1]),
+                "type": attrs.get("type") or attrs.get("node_type"),
+            })
+        for u, v, attrs in graph.edges(data=True):
+            edges.append({"from": u, "to": v, "label": attrs.get("relation") or attrs.get("type")})
+
+    # District Distribution (Reported Cases) -- same Counter(fir_df["District"])
+    # sihdashboard.py's Analytics page uses to feed its donut chart.
+    district_counts = {}
+    if not fir_df.empty and "District" in fir_df.columns:
+        district_counts = dict(Counter(fir_df["District"].dropna().astype(str)))
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "summary": net_report.get("summary", {}),
+        "top_suspects": net_report.get("top_suspects", []),
+        "critical_bridges": net_report.get("critical_bridges", []),
+        "communities": _normalise_communities(net_report.get("communities")),
+        "district_counts": district_counts,
+    }
+
+
+@app.get("/api/network/map", response_class=HTMLResponse)
+def get_network_map():
+    """Serves the interactive network map HTML that sihnetworkanalytics
+    writes to disk (network_map.html), for the dashboard's iframe."""
+    get_analytics_data()  # make sure the pipeline (and the file) has run at least once
+    if os.path.exists("network_map.html"):
+        return FileResponse("network_map.html", media_type="text/html")
+    return HTMLResponse("<p style='font-family:sans-serif;padding:20px;'>Network map not generated yet.</p>")
+
+
+@app.get("/api/timeline")
+def get_timeline(case_id: str = None):
+    """Uses sihtimeline.py's TimelineCorrelationEngine (Occurrence -> FIR
+    Report -> Call -> FASTag/Vehicle -> Bank/Crypto events, each with a
+    Risk Score) instead of the FIR-only placeholder this used to return.
+    Pass ?case_id=FIR/2026/0007 to scope to one case."""
+    if TimelineCorrelationEngine is None:
+        return {"events": [], "error": "sihtimeline.py's TimelineCorrelationEngine could not be imported (is streamlit installed?)."}
+
+    get_analytics_data()  # makes sure the CSVs exist and pins the cache version
+    return cached_response(("timeline", case_id), lambda: _build_timeline(case_id))
+
+
+def _build_timeline(case_id):
+    # load_pipeline_data() re-reads every CSV from disk -- do it once per
+    # analytics version, not once per dropdown change.
+    data_store = cached_response(("timeline-store",), TimelineCorrelationEngine.load_pipeline_data)
+    timeline_df = TimelineCorrelationEngine.build_case_timeline(data_store, selected_case_id=case_id)
+
+    events = []
+    if not timeline_df.empty:
+        for _, row in timeline_df.sort_values("DateTime").iterrows():
+            events.append({
+                "type": row.get("Event Type"),
+                "timestamp": f"{row.get('Date')} {row.get('Time')}",
+                "description": row.get("Description"),
+                "case_id": row.get("Case_ID"),
+                "person": row.get("Person"),
+                "location": row.get("Location"),
+                "source": row.get("Source"),
+                "risk_score": row.get("Risk Score"),
+            })
+    return {"events": events}
+
+
+@app.get("/api/alerts")
+def get_alerts():
+    get_analytics_data()
+    return cached_response(("alerts",), _build_alerts)
+
+
+def _build_alerts():
+    data = get_analytics_data()
+    net_report = data["net_report"]
+    intel_report = data["intel_report"]
+
+    # sihnetworkanalytics.detect_bridge_edges() returns
+    # {source, source_label, source_type, target, target_label, target_type}
+    # -- no severity/description field. A bridge edge is, by definition, a
+    # structural cut-point (removing it disconnects the network), so these
+    # are always surfaced as HIGH severity here.
+    structural = [
+        {
+            "type": "Bridge Node Detected",
+            "severity": "HIGH",
+            "details": f"{b.get('source_label', b.get('source'))} ({b.get('source_type', '?')}) "
+                       f"\u2194 {b.get('target_label', b.get('target'))} ({b.get('target_type', '?')}) "
+                       f"-- removing this link splits the network.",
+        }
+        for b in net_report.get("critical_bridges", [])
+    ]
+
+    # sihintelligenceengine's alerts use alert_type/summary/severity
+    # (lowercase "critical"/"high"/"medium"/"low"), not the type/details/
+    # SEVERITY shape dashboard-integration.js's renderAlertsTab expects.
+    statistical = [
+        {
+            "type": a.get("alert_type"),
+            "severity": str(a.get("severity", "")).upper(),
+            "details": a.get("summary"),
+            "score": a.get("score"),
+            "confidence": a.get("confidence"),
+            "entities": a.get("entities", []),
+        }
+        for a in intel_report.get("alerts", [])
+    ]
+
+    return {
+        "structural": structural,
+        "statistical": statistical,
+        "meta": intel_report.get("meta", {"alert_count": len(statistical), "critical_or_high_alerts": 0}),
+    }
+
+
+@app.get("/api/persons")
+def get_persons():
+    """Feeds the Persons & Witnesses tab. Besides the alias-merge data this
+    already returned, this now also ports sihdashboard.py's "Persons" tab
+    (every Informant/Victim/Accused across all FIRs, by role, with their
+    graph connection count) and its "Entities by Type" tab (node-type
+    breakdown of the same relationship graph), using sihdashboard.py's own
+    person_node_id()/degree-lookup pattern."""
+    get_analytics_data()
+    return cached_response(("persons",), _build_persons)
+
+
+def _build_persons():
+    data = get_analytics_data()
+    entity_resolution = data["entity_resolution"]
+    graph = data["graph"]
+    fir_cases = data["fir_cases"]
+
+    # sihrelationship.py's build_relationship_graph() names these fields
+    # canonical_name/aliases_merged and name_a/name_b -- renamed here to
+    # match what dashboard-integration.js's renderPersonsTab reads
+    # (canonical_id/aliases and person_a/person_b).
+    confirmed_merges = [
+        {
+            "canonical_id": c.get("canonical_name"),
+            "aliases": c.get("aliases_merged", []),
+            "confidence": c.get("confidence"),
+        }
+        for c in entity_resolution.get("merged_clusters", [])
+    ]
+    review_queue = [
+        {
+            "person_a": p.get("name_a"),
+            "person_b": p.get("name_b"),
+            "score": p.get("score"),
+            "features": p.get("features"),
+        }
+        for p in entity_resolution.get("possible_duplicates", [])
+    ]
+
+    # Persons & Witnesses, by role -- ported from sihdashboard.py's
+    # "Persons and Witnesses" -> "Persons" tab. Informant/Victim/Accused are
+    # the three role columns every FIR row carries (witness statements feed
+    # into the same PERSON:: nodes via sihentityresolution.py's matching, so
+    # a name here that was corroborated by a witness statement still shows
+    # its full connection count from the graph).
+    by_role = []
+    for case in fir_cases:
+        for role, col in (("Informant", "Informant_Name"), ("Victim", "Victim_Name"),
+                           ("Accused", "Accused_Name_Alias")):
+            name = case.get(col)
+            if not name or str(name).strip().lower() in ("", "nan", "unknown accused"):
+                continue
+            pid = person_node_id(name)
+            conn = graph.degree(pid) if (graph is not None and pid and pid in graph) else 0
+            by_role.append({
+                "name": name,
+                "role": role,
+                "case_id": case.get("FIR_No"),
+                "district": case.get("District"),
+                "connections": conn,
+            })
+
+    # Entities by Type -- ported from sihdashboard.py's "Entities by Type"
+    # tab: a count of every node type currently in the relationship graph
+    # (PERSON, PHONE, VEHICLE, ACCOUNT, LOCATION, CASE, ...).
+    entity_types = []
+    if graph is not None:
+        type_counts = Counter()
+        for _, attrs in graph.nodes(data=True):
+            type_counts[attrs.get("type") or attrs.get("node_type") or "Unknown"] += 1
+        entity_types = [{"type": k, "count": v} for k, v in type_counts.items()]
+
+    return {
+        "confirmed_merges": confirmed_merges,
+        "review_queue": review_queue,
+        "by_role": by_role,
+        "entity_types": entity_types,
+    }
+
+
+@app.get("/api/analytics")
+def get_analytics():
+    data = get_analytics_data()
+    net_report = data["net_report"]
+    graph = data["graph"]
+
+    node_type_counts = Counter()
+    if graph is not None:
+        for _, attrs in graph.nodes(data=True):
+            node_type_counts[attrs.get("type") or attrs.get("node_type") or "Unknown"] += 1
+
+    return {
+        "centrality": net_report.get("top_suspects", []),
+        "node_types": [{"type": k, "count": v} for k, v in node_type_counts.items()],
+        "summary": net_report.get("summary", {}),
+    }
+
+
+@app.get("/api/districts")
+def get_districts():
+    """Feeds the FIR-registration form's district dropdown
+    (dashboard-integration.js -> loadFIRFormData)."""
+    return {"districts": list(DISTRICTS)}
+
+
+# register_custom_fir(user_fir_data: dict) takes ONE dict (not **kwargs) with
+# PascalCase/underscore keys matching generate_fir_dataset()'s row schema
+# (District, Police_Station, Case_Type, Informant_Name, Victim_Age, ...).
+# The FIR form in submitFIRForm() collects snake_case fields with different
+# names (complainant_name, victim_age, accused_name, ...) for a richer
+# 7-step form than register_custom_fir's schema covers. This maps the
+# fields that DO have a home; the rest (fir_type, fir_filter, linked_gd,
+# beat, location_category, complainant_address_type, accused_alias,
+# video_recorded, delay_reason, zero_fir, reregistration,
+# cross_case_reference, court_copy_required) have no matching field in
+# register_custom_fir and are currently dropped -- register_custom_fir
+# would need new parameters to capture them.
+FIR_FORM_FIELD_MAP = {
+    "district": "District",
+    "police_station": "Police_Station",
+    "case_type": "Case_Type",
+    "place_of_occurrence": "Place_of_Occurrence",
+    "complainant_name": "Informant_Name",
+    "complainant_mobile": "Informant_Contact",
+    "complainant_address": "Informant_Address",
+    "victim_name": "Victim_Name",
+    "victim_age": "Victim_Age",
+    "victim_gender": "Victim_Gender",
+    "victim_contact": "Victim_Contact",
+    "accused_mobile": "Accused_Contact",
+    "accused_address": "Accused_Address",
+    "investigating_officer": "Investigating_Officer_Name",
+    "narrative": "FIR_Narrative_Statement",
+    # extra keys the Upload-FIR-PDF tab sends (same ones sihdashboard's form passes)
+    "acts_sections": "Acts_Sections",
+    "state": "State_UT",
+    "fir_number": "FIR_No",
+    "reporting_datetime": "Date_Time_of_FIR",
+}
+
+
+@app.post("/api/fir/register")
+def api_register_fir(payload: dict = Body(...)):
+    """Registers a new FIR via the same register_custom_fir() the Streamlit
+    dashboard uses, then invalidates the analytics cache so the next
+    /api/overview, /api/network, etc. picks up the new case."""
+    user_fir_data = {
+        schema_key: payload[form_key]
+        for form_key, schema_key in FIR_FORM_FIELD_MAP.items()
+        if payload.get(form_key) not in (None, "")
+    }
+    # accused_known === false means the officer explicitly doesn't have a
+    # name for the accused -- register_custom_fir treats "unknown" (case-
+    # insensitive substring) in Accused_Name_Alias as the "Accused_Status:
+    # Unknown" signal, so pass that through explicitly rather than the
+    # possibly-empty accused_name field.
+    if payload.get("accused_known") is False:
+        user_fir_data["Accused_Name_Alias"] = "Unknown Accused"
+    elif payload.get("accused_name"):
+        user_fir_data["Accused_Name_Alias"] = payload["accused_name"]
+
+    try:
+        result = register_custom_fir(user_fir_data)
+    except Exception:
+        logger.error("FIR registration failed:\n%s", traceback.format_exc())
+        return JSONResponse(status_code=500, content={"status": "error", "message": "FIR registration failed."})
+
+    get_analytics_data(force_refresh=True)  # new FIR case -> rebuild graph/analytics
+    fir_no = result.get("fir_case", {}).get("FIR_No") if isinstance(result, dict) else None
+    return _strip_connectivity({"status": "success", "fir_number": fir_no, "result": result})
+
+
+# ==========================================
+# FIR PDF UPLOAD + FIELD EXTRACTION
+# ==========================================
+# Everything from here down to extract_fir_fields_local() is ported straight
+# from sihdashboard.py (regex-first extraction, OCR repair for garbled
+# Devanagari, Groq translation/classification). Only change: it takes raw
+# PDF bytes instead of a Streamlit UploadedFile.
+
+PDF_IMPORT_ERROR = None
+try:
+    import pypdf
+except Exception as _pdf_import_exc:
+    PDF_IMPORT_ERROR = str(_pdf_import_exc)
+
+# -----------------------------------------------------------------------
+# OCR fallback — ONLY thing that can actually fix the broken-font-cmap
+# corruption (e.g. "मुंबई रेã वे" instead of "मुंबई रेल्वे"). pypdf reads the
+# PDF's embedded text layer, which on these auto-generated NCRB forms maps
+# to the wrong Unicode codepoints for machine-printed Devanagari. The
+# glyphs still *draw* correctly on screen (that's why the page looks fine
+# visually) — it's only the underlying character codes that are wrong. No
+# LLM, local or hosted, can recover that; you have to bypass the text
+# layer entirely and read the rendered pixels instead.
+#
+# Install: pip install pdf2image pytesseract
+#          + the tesseract binary itself, with Marathi/Hindi language data:
+#          Ubuntu/Debian: sudo apt install tesseract-ocr tesseract-ocr-mar tesseract-ocr-hin poppler-utils
+#          macOS:         brew install tesseract tesseract-lang poppler
+# Guarded the same way as every other optional dependency in this file —
+# if it's missing, the dashboard just falls back to the pypdf text layer
+# for those fields (still garbled, but nothing crashes).
+# -----------------------------------------------------------------------
+OCR_IMPORT_ERROR = None
+try:
+    import pytesseract
+    from pdf2image import convert_from_bytes
+except Exception as _ocr_import_exc:
+    OCR_IMPORT_ERROR = str(_ocr_import_exc)
+
+# -----------------------------------------------------------------------
+# GROQ API — replaces the local Ollama call for FIR field extraction only.
+# The sidebar "AI Assistant" SOP/RAG page still uses local Ollama
+# (RAG_LLM_MODEL further down) — untouched, separate concern. This is
+# free-tier, hosted, no local model/RAM needed. Get a key at
+# https://console.groq.com/keys and set it as an environment variable
+# (see the run steps) — never hardcode it in this file.
+# -----------------------------------------------------------------------
+GROQ_IMPORT_ERROR = None
+try:
+    from groq import Groq as _Groq
+except Exception as _groq_import_exc:
+    GROQ_IMPORT_ERROR = str(_groq_import_exc)
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+FIR_EXTRACTION_LLM_MODEL = "llama-3.3-70b-versatile"
+
+
+def _get_groq_client():
+    """Returns a Groq client, or None + reason if unavailable."""
+    if GROQ_IMPORT_ERROR:
+        return None, f"`groq` package not installed: {GROQ_IMPORT_ERROR}"
+    if not GROQ_API_KEY:
+        return None, "GROQ_API_KEY environment variable is not set."
+    try:
+        return _Groq(api_key=GROQ_API_KEY), None
+    except Exception as e:
+        return None, f"Could not initialize Groq client: {e}"
+
+
+def render_and_ocr_page(pdf_bytes, page_number=0, lang="mar+hin+eng"):
+    """Rasterizes one PDF page to an image and OCRs it directly — this is
+    what actually reads the correct Devanagari, bypassing pypdf's broken
+    text layer entirely. Returns "" on any failure (missing deps, missing
+    tesseract binary, bad page index) rather than raising, so a caller can
+    always fall back to the regex/pypdf fields."""
+    if OCR_IMPORT_ERROR:
+        return ""
+    try:
+        pages = convert_from_bytes(pdf_bytes, dpi=300, first_page=page_number + 1, last_page=page_number + 1)
+        if not pages:
+            return ""
+        return pytesseract.image_to_string(pages[0], lang=lang)
+    except Exception:
+        return ""
+
+# -----------------------------------------------------------------------
+# spaCy NER — pulls named entities (people, places, dates) straight out of
+# the FIR narrative text, as a lightweight cross-check/backfill on top of
+# the regex + Groq fields above. Deliberately runs on the FINAL narrative
+# (i.e. AFTER Groq's full translation, further down), because the shipped
+# en_core_web_sm model is English-only and gives poor results on raw
+# Hindi/Marathi script. It only ever fills in a value that's still empty
+# (or a placeholder like "Unknown") — it never overwrites something the
+# regex/Groq steps already found, since those are more reliable for the
+# fields they do cover.
+# Install: pip install spacy && python -m spacy download en_core_web_sm
+# Guarded the same way as the OCR/Groq deps: missing spaCy just means this
+# step silently no-ops and the pipeline behaves exactly as it did before.
+# -----------------------------------------------------------------------
+SPACY_IMPORT_ERROR = None
+_SPACY_NLP = None
+try:
+    import spacy
+except Exception as _spacy_import_exc:
+    SPACY_IMPORT_ERROR = str(_spacy_import_exc)
+
+
+def _get_spacy_nlp():
+    """Lazily loads en_core_web_sm once per process. Returns (nlp, error)."""
+    global _SPACY_NLP
+    if SPACY_IMPORT_ERROR:
+        return None, f"`spacy` package not installed: {SPACY_IMPORT_ERROR}"
+    if _SPACY_NLP is not None:
+        return _SPACY_NLP, None
+    try:
+        _SPACY_NLP = spacy.load("en_core_web_sm")
+        return _SPACY_NLP, None
+    except Exception as e:
+        return None, (
+            "spaCy model 'en_core_web_sm' not found -- run: "
+            "python -m spacy download en_core_web_sm "
+            f"(underlying error: {e})"
+        )
+
+
+def _spacy_extract_narrative_entities(narrative_text):
+    """Runs spaCy NER over the (English) narrative and buckets entities by
+    type: PERSON -> persons, GPE/LOC/FAC -> locations, DATE -> dates.
+    Never raises and never returns None -- if spaCy/the model isn't
+    installed, or the narrative is empty, it just returns empty lists so
+    callers can use it unconditionally without extra guards."""
+    empty = {"persons": [], "locations": [], "dates": []}
+    if not narrative_text or not narrative_text.strip():
+        return empty
+    nlp, error = _get_spacy_nlp()
+    if error:
+        return empty
+    try:
+        doc = nlp(narrative_text[:5000])  # cap -- narratives can run long
+    except Exception:
+        return empty
+    persons, locations, dates = [], [], []
+    for ent in doc.ents:
+        value = ent.text.strip()
+        if not value:
+            continue
+        if ent.label_ == "PERSON" and value not in persons:
+            persons.append(value)
+        elif ent.label_ in ("GPE", "LOC", "FAC") and value not in locations:
+            locations.append(value)
+        elif ent.label_ == "DATE" and value not in dates:
+            dates.append(value)
+    return {"persons": persons, "locations": locations, "dates": dates}
+
+
+FIR_EXTRACTION_SCHEMA_FIELDS = [
+    "District", "Police_Station", "Case_Type", "Acts_Sections", "Place_of_Occurrence",
+    "Informant_Name", "Informant_Contact", "Informant_Address",
+    "Victim_Name", "Victim_Contact", "Accused_Name_Alias", "Accused_Contact",
+    "Accused_Address", "FIR_Narrative_Statement",
+]
+
+
+
+
+
+def _parse_llm_json_loose(text):
+    """
+    Small local models frequently emit JSON that's *almost* valid but breaks
+    Python's strict json.loads(), most commonly because a text field contains
+    a literal newline/tab instead of an escaped "\\n"/"\\t". This tries
+    progressively more forgiving parse strategies instead of failing outright.
+    """
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(text, strict=False)
+    except json.JSONDecodeError:
+        pass
+    no_trailing_commas = re.sub(r",\s*([}\]])", r"\1", text)
+    try:
+        return json.loads(no_trailing_commas, strict=False)
+    except json.JSONDecodeError:
+        pass
+    repaired = []
+    in_string = False
+    escape_next = False
+    for ch in no_trailing_commas:
+        if escape_next:
+            repaired.append(ch)
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            repaired.append(ch)
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            repaired.append(ch)
+            continue
+        if in_string and ch == "\n":
+            repaired.append("\\n")
+        elif in_string and ch == "\r":
+            repaired.append("\\r")
+        elif in_string and ch == "\t":
+            repaired.append("\\t")
+        else:
+            repaired.append(ch)
+    return json.loads("".join(repaired))
+
+
+# =============================================================================
+# REGEX-FIRST FIELD EXTRACTION
+# -----------------------------------------------------------------------------
+# These NCRB I.I.F.-I FIR forms are auto-generated with a very consistent
+# bilingual layout: an English label, a parenthetical vernacular translation
+# of that label, a colon, then the actual value. The English labels extract
+# cleanly and reliably through pypdf every time; some auto-filled Devanagari
+# VALUES (e.g. a machine-printed District name) come from a subsetted font
+# with a broken character map and extract as genuinely corrupted Unicode —
+# no amount of prompting an LLM can "translate" scrambled codepoints back to
+# real text. Human-typed fields (informant name, phone, address, narrative),
+# by contrast, extract correctly.
+#
+# So: pull every field we can locate structurally with regex FIRST — this is
+# deterministic, instant, and can't hallucinate. Only hand the LLM a small,
+# focused job afterwards (translate/transliterate a few short snippets and
+# names + fully translate the narrative + classify the case type, deferring
+# to the deterministic section-code lookup when one exists). If the LLM is
+# slow, unavailable, or misbehaves, we still return everything regex found —
+# including Name and Phone, which is what actually matters most.
+# =============================================================================
+
+# A few ultra-common fixed phrases that appear near-verbatim on almost every
+# Indian FIR — safe to hardcode, no LLM guesswork needed.
+_COMMON_TERM_TRANSLATIONS = {
+    "अनोळखी": "Unknown",
+    "अज्ञात": "Unknown",
+}
+
+
+def _translate_common_terms(text):
+    if not text:
+        return text
+    for hi, en in _COMMON_TERM_TRANSLATIONS.items():
+        text = text.replace(hi, en)
+    return text.strip()
+
+
+def _label_value(text, label_pattern):
+    """Find 'Label (vernacular translation): VALUE' — tolerant of the
+    parenthetical and colon being split across several lines, which pypdf
+    does constantly on these forms — and return the first non-empty line
+    after the colon."""
+    pattern = label_pattern + r"\s*\n?\(.*?\)\s*:\s*"
+    m = re.search(pattern, text, re.DOTALL)
+    if not m:
+        return ""
+    for line in text[m.end():].split("\n"):
+        line = line.strip()
+        if line:
+            return line
+    return ""
+
+
+def _extract_acts_section(text):
+    """Pulls the Act name + Section code out of the item-2 table."""
+    idx = text.find("Sections")
+    if idx == -1:
+        return "", ""
+    lines = text[idx:].split("\n")
+    i = 0
+    while i < len(lines) and not re.match(r"^\s*\d+\s*$", lines[i]):
+        i += 1
+    i += 1  # skip the serial-number row
+    act_lines, section_code = [], ""
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+        if not line:
+            continue
+        if re.match(r"^\d{1,4}\s*(\(\d{1,3}\))?$", line):
+            section_code = line
+            break
+        act_lines.append(line)
+    return " ".join(act_lines), section_code
+
+
+def _extract_current_address(text):
+    """Pulls row 1 (current address) out of the informant's address table."""
+    m = re.search(r"Address\s*\n?\(.*?\)::\s*", text, re.DOTALL)
+    if not m:
+        return ""
+    lines = text[m.end():].split("\n")
+    i = 0
+    while i < len(lines) and not re.match(r"^\s*\d+\s*$", lines[i]):
+        i += 1
+    i += 1  # skip serial number
+    if i < len(lines):
+        i += 1  # skip the address-type label (e.g. "current address")
+    addr_lines = []
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+        if re.match(r"^\s*\d+\s*$", line):
+            break
+        if line:
+            addr_lines.append(line)
+    return " ".join(addr_lines)
+
+
+def _extract_accused_name(text):
+    """Pulls the first accused's Name from the item-7 table."""
+    idx = text.find("Details of known")
+    if idx == -1:
+        return ""
+    m = re.search(r"Present Address\(.*?\)\)\s*", text[idx:], re.DOTALL)
+    if not m:
+        return ""
+    lines = [l.strip() for l in text[idx:][m.end():].split("\n") if l.strip()]
+    return lines[1] if len(lines) > 1 else ""
+
+
+def _extract_narrative(text):
+    """Pulls the full item-12 narrative statement (raw script)."""
+    m = re.search(r"First Information contents\s*\n?\(.*?\)\s*:\s*", text, re.DOTALL)
+    if not m:
+        return ""
+    rest = text[m.end():]
+    end = re.search(r"\n\s*13\.", rest)
+    narrative = rest[:end.start()] if end else rest[:1500]
+    return re.sub(r"\s+", " ", narrative).strip()
+
+
+def _extract_mobile(text):
+    val = _label_value(text, r"Mobile")
+    if val:
+        return val
+    # Fallback: any phone-looking digit run near "Phone number"/"Mobile".
+    m = re.search(r"(\+?\d[\d\-\s]{8,14}\d)", text)
+    return m.group(1).strip() if m else ""
+
+
+def _regex_extract_fir_fields(raw_text):
+    """Deterministic, LLM-free extraction of every field this form's layout
+    makes locatable. Always returns a dict with all schema keys (possibly
+    empty strings) — this is the reliable floor the LLM enrichment builds on
+    top of, never something the LLM's failure can erase."""
+    district = _label_value(raw_text, r"District\s*\n")
+    police_station = _label_value(raw_text, r"P\.S\.")
+    place_of_occurrence = _label_value(raw_text, r"\(b\) Address")
+    informant_name = _label_value(raw_text, r"\(a\)\s*\nName")
+    informant_contact = _extract_mobile(raw_text)
+    informant_address = _extract_current_address(raw_text)
+    act_name, section_code = _extract_acts_section(raw_text)
+    acts_sections = (f"{act_name} Section {section_code}".strip()
+                     if section_code else act_name)
+    accused_name = _translate_common_terms(_extract_accused_name(raw_text))
+    narrative = _extract_narrative(raw_text)
+
+    return {
+        "District": district,
+        "Police_Station": police_station,
+        "Case_Type": "",  # needs judgement — left for the LLM enrichment step
+        "Acts_Sections": acts_sections,
+        "Place_of_Occurrence": place_of_occurrence,
+        "Informant_Name": informant_name,
+        "Informant_Contact": informant_contact,
+        "Informant_Address": informant_address,
+        # This form has no separate "victim" section for theft-type FIRs —
+        # the informant IS the victim. Default to that; a real victim
+        # section (if the form has one) would override this.
+        "Victim_Name": informant_name,
+        "Victim_Contact": informant_contact,
+        "Accused_Name_Alias": accused_name,
+        "Accused_Contact": "",
+        "Accused_Address": "",
+        "FIR_Narrative_Statement": narrative,
+    }
+
+
+def _looks_like_garbled_devanagari(s):
+    """Detects TWO different corruption patterns seen from pypdf on these
+    forms — a model swap fixes neither, only OCR does:
+      1. Broken font-cmap: odd Latin lookalike glyphs mixed into Devanagari
+         (e.g. 'मǕंबई रेã वे').
+      2. Matra/anusvara reordering: real Devanagari codepoints, but a
+         combining mark (ं, ा, े, etc.) lands after the wrong consonant,
+         often with a stray space (e.g. 'अंधेरी' extracted as 'अधं ेरी').
+         This keeps every original character, just out of order, so it
+         does NOT contain any Latin-lookalike glyph and pattern #1 alone
+         misses it entirely — which is why PS/Place kept failing silently.
+    """
+    if not s:
+        return False
+    suspicious_chars = set("ǕãȨĤǒȭÛĐ")
+    if any(ch in suspicious_chars for ch in s):
+        return True
+    # Pattern 2: a combining mark (Devanagari vowel sign/anusvara/etc.)
+    # preceded by whitespace, or immediately followed by whitespace then
+    # another combining mark run — real, correctly-ordered Devanagari text
+    # never puts a space directly before/after a bare combining mark.
+    if re.search(r"[\u0900-\u0903\u093A-\u094F\u0955-\u0963]\s", s) and re.search(r"\s[\u0900-\u0903\u093A-\u094F]", s):
+        return True
+    return False
+
+
+def _fuzzy_match_canonical(value, choices, cutoff=0.55):
+    """Matches a possibly-corrupted extracted string against a fixed,
+    known vocabulary (district names, police station names, etc.) by
+    similarity rather than exact equality. This is the practical fix for
+    matra-reordering corruption: the corrupted string still shares almost
+    every character with the correct one, just shuffled, so a similarity
+    match finds it even when an exact `in choices` check (see the old
+    `DISTRICTS.index(...) if x in DISTRICTS else 0` pattern) fails and
+    silently falls back to whatever option happens to sit at index 0.
+    Returns the best match, or "" if nothing clears the cutoff."""
+    if not value or not choices:
+        return ""
+    import difflib
+    matches = difflib.get_close_matches(value, choices, n=1, cutoff=cutoff)
+    return matches[0] if matches else ""
+
+
+# Reverse lookup built from your OWN BNS_CRIME_DATABASE (each entry already
+# stores its section under the "bns" key) — e.g. "Section 303(2)" -> pulls
+# out "303" -> maps back to whichever Case_Type key that entry belongs to.
+# This makes Case_Type classification a DETERMINISTIC TABLE LOOKUP off the
+# numeric section code (which extracts perfectly via regex — it's plain
+# digits, nothing Devanagari to corrupt) instead of an LLM guess. BNS 2023
+# is only ~2 years old; even a 70B model is unreliable mapping section
+# numbers to offense categories from general knowledge, which is exactly
+# how you got "Acid Attack" out of a mobile-phone-theft narrative.
+def _build_bns_section_lookup():
+    lookup = {}
+    for case_type, info in BNS_CRIME_DATABASE.items():
+        m = re.search(r"\b(\d{1,3})\b", str(info.get("bns", "")))
+        if m:
+            lookup[m.group(1)] = case_type
+    return lookup
+
+
+BNS_SECTION_TO_CASE_TYPE = _build_bns_section_lookup()
+
+
+def _case_type_from_section_code(section_code):
+    """section_code looks like '303(2)' or '303' — pull the base section
+    number and look it up deterministically. Returns "" if no match, so
+    the caller can still fall back to the LLM for genuinely novel codes
+    not yet in BNS_CRIME_DATABASE."""
+    if not section_code:
+        return ""
+    m = re.search(r"\b(\d{1,3})\b", section_code)
+    return BNS_SECTION_TO_CASE_TYPE.get(m.group(1), "") if m else ""
+
+
+def extract_fir_fields_local(pdf_bytes):
+    """
+    Reads the uploaded PDF's text, extracts every locatable field with
+    regex FIRST (deterministic, always correct when the layout matches,
+    never dependent on any model), then calls the Groq API to do the
+    residual job regex can't: translate/transliterate short native-script
+    snippets and names into English, fully translate the narrative (not a
+    summary), and classify Case_Type — deferring to the deterministic
+    BNS-section-code lookup whenever one exists. Returns
+    (extracted_dict, error_message) — exactly one of the two is None.
+    If the LLM step fails for any reason, the regex-extracted fields
+    (Name, Phone, Address, etc.) are still returned rather than lost.
+    Connectivity_Type is deliberately NOT part of the schema: the pipeline
+    always derives it from Case_Type / Acts_Sections / occurrence spread
+    (see determine_connectivity_type() in main_investigation_pipeline.py).
+    """
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        raw_text = "".join(page.extract_text() or "" for page in reader.pages)
+    except Exception as e:
+        return None, f"Could not open this PDF: {e}"
+
+    if not raw_text.strip():
+        return None, "No readable text found in this PDF — it may be a scanned image without OCR text."
+
+    fields = _regex_extract_fir_fields(raw_text)
+
+    # DETERMINISTIC Case_Type — try the section-code table lookup first.
+    # section_code was captured separately inside _extract_acts_section();
+    # re-derive it here from the combined Acts_Sections string since that's
+    # all _regex_extract_fir_fields returns.
+    _section_match = re.search(r"(\d{1,3})(?:\(\d{1,3}\))?\s*$", fields.get("Acts_Sections", ""))
+    if _section_match:
+        _looked_up_case_type = _case_type_from_section_code(_section_match.group(0))
+        if _looked_up_case_type:
+            fields["Case_Type"] = _looked_up_case_type
+
+    # OCR REPAIR PASS — the District/Police_Station/Place_of_Occurrence
+    # values above come from pypdf's text layer, which on these forms is
+    # frequently a scrambled font-cmap for machine-printed Devanagari (see
+    # _looks_like_garbled_devanagari). If any of them trip that check,
+    # re-read just page 1 as an image and OCR it directly, then re-run the
+    # same regexes against the OCR'd text. This is what actually fixes the
+    # corruption — no LLM step can. Silently no-ops if pytesseract/pdf2image
+    # aren't installed, or if OCR doesn't do any better.
+    garbled_keys = [k for k in ("District", "Police_Station", "Place_of_Occurrence")
+                     if _looks_like_garbled_devanagari(fields.get(k, ""))]
+    if garbled_keys and not OCR_IMPORT_ERROR:
+        ocr_text = render_and_ocr_page(pdf_bytes, page_number=0)
+        if ocr_text.strip():
+            ocr_fields = _regex_extract_fir_fields(ocr_text)
+            for k in garbled_keys:
+                if ocr_fields.get(k) and not _looks_like_garbled_devanagari(ocr_fields[k]):
+                    fields[k] = ocr_fields[k]
+
+    groq_client, groq_error = _get_groq_client()
+    if groq_error:
+        # No Groq access — still return everything regex found (Name/Phone/
+        # Address/etc. are already correct English-or-native-script values),
+        # just without translation/classification.
+        if fields.get("District"):
+            best = _fuzzy_match_canonical(fields["District"], DISTRICTS)
+            fields["District"] = best if best else ""
+        return {k: v for k, v in fields.items() if str(v).strip()}, None
+
+    # Build a focused enrichment prompt: short field snippets + names to
+    # translate/transliterate, plus the full narrative for FULL English
+    # translation (not a summary — the earlier one-sentence summary dropped
+    # details like the phone model/IMEI/amount that investigators need).
+    to_translate = {
+        "District": fields["District"],
+        "Police_Station": fields["Police_Station"],
+        "Place_of_Occurrence": fields["Place_of_Occurrence"],
+        "Informant_Address": fields["Informant_Address"],
+        "Acts_Sections": fields["Acts_Sections"],
+        "Informant_Name": fields["Informant_Name"],
+        "Victim_Name": fields["Victim_Name"],
+        "Accused_Name_Alias": fields["Accused_Name_Alias"],
+    }
+    to_translate = {k: v for k, v in to_translate.items() if v}
+
+    enrich_prompt = (
+        "Translate each of these short Indian police-form field values from "
+        "Hindi/Marathi into natural English. For Informant_Name, Victim_Name "
+        "and Accused_Name_Alias, transliterate the person's name into its "
+        "standard English spelling (e.g. 'सबीर अली शेख' -> 'Sabir Ali "
+        "Shaikh') rather than translating word-for-word; for place names, "
+        "use the standard English spelling (e.g. 'Andheri', 'Mumbai'). Also "
+        "translate the full narrative into clear, complete English — this "
+        "must be a full translation, NOT a summary: keep every fact "
+        "(dates, times, amounts, phone/IMEI numbers, descriptions) exactly "
+        "as stated, just in English. Also pick the single best Case_Type "
+        f"from this exact list: {', '.join(sorted(BNS_CRIME_DATABASE.keys()))}.\n\n"
+        "Respond with ONLY a valid JSON object with exactly these keys: "
+        + ", ".join(f'"{k}"' for k in list(to_translate.keys()) + ["Case_Type", "Narrative_English"])
+        + ". No markdown fences, no commentary.\n\n"
+        f"FIELDS TO TRANSLATE:\n{json.dumps(to_translate, ensure_ascii=False, indent=2)}\n\n"
+        f"NARRATIVE TO TRANSLATE IN FULL:\n{fields['FIR_Narrative_Statement'][:2500]}"
+    )
+
+    extracted_llm = None
+    last_error = None
+    last_raw_response = ""
+    try:
+        completion = groq_client.chat.completions.create(
+            model=FIR_EXTRACTION_LLM_MODEL,
+            temperature=0.1,
+            max_tokens=1800,
+            messages=[{"role": "user", "content": enrich_prompt}],
+        )
+        raw_response = completion.choices[0].message.content
+        last_raw_response = raw_response
+
+        clean_response = re.sub(r"<think>.*?</think>", "", raw_response, flags=re.DOTALL).strip()
+        clean_response = re.sub(r"^```(?:json)?|```$", "", clean_response.strip(), flags=re.MULTILINE).strip()
+        match = re.search(r"\{.*\}", clean_response, re.DOTALL)
+        json_str = match.group(0) if match else clean_response
+
+        try:
+            extracted_llm = _parse_llm_json_loose(json_str)
+        except Exception as e:
+            last_error = e
+    except Exception as e:
+        # Network error, invalid/expired key, rate limit, etc. — fall back
+        # to the regex fields below rather than failing the whole upload.
+        last_error = e
+
+    # Merge: LLM translations enrich the regex floor, but never replace it
+    # with something empty/nonsensical, and regex values are the guaranteed
+    # fallback if the LLM failed entirely.
+    _case_type_is_deterministic = bool(fields.get("Case_Type")) and (
+        _section_match is not None and _case_type_from_section_code(_section_match.group(0)) == fields.get("Case_Type")
+    )
+    if extracted_llm:
+        for key in ("District", "Police_Station", "Place_of_Occurrence", "Informant_Address", "Acts_Sections",
+                    "Informant_Name", "Victim_Name", "Accused_Name_Alias"):
+            val = str(extracted_llm.get(key, "")).strip()
+            # Guard: an address field is never allowed to become an email.
+            # This is exactly the "-851502 @ gmail.com" bug — a weak model
+            # confusing the informant's email with their postal address.
+            # Reject and keep whatever regex already found instead.
+            if key == "Informant_Address" and ("@" in val or "gmail" in val.lower()):
+                continue
+            if val:
+                fields[key] = val
+        # Only trust the LLM's Case_Type guess when we had no deterministic
+        # section-code match — a table lookup off a clean numeric code beats
+        # an LLM guessing offense categories from a ~2-year-old legal code.
+        if not _case_type_is_deterministic:
+            case_type = str(extracted_llm.get("Case_Type", "")).strip()
+            if case_type in BNS_CRIME_DATABASE:
+                fields["Case_Type"] = case_type
+        narrative_en = str(extracted_llm.get("Narrative_English", "")).strip()
+        if narrative_en:
+            fields["FIR_Narrative_Statement"] = narrative_en
+    # else: last_error / last_raw_response are available for debugging but
+    # we deliberately do NOT fail the whole extraction — regex fields stand.
+
+    # spaCy NER pass over the finalized (English) narrative. This is pure
+    # backfill: it only touches Accused_Name_Alias when that's still empty
+    # or a placeholder ("Unknown"/"Unknown Accused"), and only touches
+    # Place_of_Occurrence when that's still empty. Named dates mentioned in
+    # the narrative (e.g. "on 14 March 2025") are surfaced as an extra,
+    # informational field — there's no form field wired to it yet, but it
+    # rides along in the response for the reviewer to see/use.
+    narrative_entities = _spacy_extract_narrative_entities(fields.get("FIR_Narrative_Statement", ""))
+    if narrative_entities["dates"]:
+        fields["Incident_Dates_Mentioned"] = ", ".join(narrative_entities["dates"])
+
+    accused_val = (fields.get("Accused_Name_Alias") or "").strip().lower()
+    if narrative_entities["persons"] and accused_val in ("", "unknown", "unknown accused"):
+        informant_val = (fields.get("Informant_Name") or "").strip().lower()
+        victim_val = (fields.get("Victim_Name") or "").strip().lower()
+        for candidate in narrative_entities["persons"]:
+            # Don't let the informant/victim (who's also named in most
+            # narratives) get mistaken for the accused.
+            if candidate.strip().lower() not in (informant_val, victim_val):
+                fields["Accused_Name_Alias"] = candidate
+                break
+
+    if narrative_entities["locations"] and not (fields.get("Place_of_Occurrence") or "").strip():
+        fields["Place_of_Occurrence"] = narrative_entities["locations"][0]
+
+    # District fuzzy-match — the review form's dropdown needs an EXACT string
+    # match against DISTRICTS to pre-select anything, and any leftover
+    # corruption (or a slightly different phrasing than the canonical list)
+    # would silently land on the first option instead. Fuzzy-match first so
+    # it gets pre-selected whenever a close-enough option exists, and leave
+    # the field blank (honest "we don't know") when nothing is close.
+    if fields.get("District"):
+        best = _fuzzy_match_canonical(fields["District"], DISTRICTS)
+        fields["District"] = best if best else ""
+
+    return {k: v for k, v in fields.items() if str(v).strip()}, None
+
+
+def _strip_connectivity(obj):
+    """Connectivity_Type is classified internally by the pipeline but is not
+    meant to be shown to users, so it gets scrubbed from anything that leaves
+    the server (report tables, the FIR-register response)."""
+    if isinstance(obj, dict):
+        return {k: _strip_connectivity(v) for k, v in obj.items()
+                if "connectivity_type" not in str(k).lower().replace(" ", "_")}
+    if isinstance(obj, list):
+        return [_strip_connectivity(v) for v in obj]
+    return obj
+
+
+@app.get("/api/fir/extract/status")
+def api_fir_extract_status():
+    """Tells the Upload-FIR tab what's available (pypdf / Groq) and feeds its
+    dropdowns: districts + case types (with each one's default BNS section)."""
+    _client, groq_error = _get_groq_client()
+    return {
+        "pdf_error": PDF_IMPORT_ERROR,
+        "groq_error": groq_error,
+        "groq_model": FIR_EXTRACTION_LLM_MODEL,
+        "districts": list(DISTRICTS),
+        "case_types": {k: str(v.get("bns", "")) for k, v in sorted(BNS_CRIME_DATABASE.items())},
+    }
+
+
+@app.post("/api/fir/extract")
+async def api_fir_extract(request: Request):
+    """Body = the raw PDF bytes (no multipart, so python-multipart isn't
+    needed). Returns {status, fields} with the same schema keys the
+    Streamlit form pre-fills from."""
+    if PDF_IMPORT_ERROR:
+        return JSONResponse(status_code=503, content={"status": "error", "message": f"PDF reading isn't available: {PDF_IMPORT_ERROR}"})
+    pdf_bytes = await request.body()
+    if not pdf_bytes:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "No file received."})
+    if not pdf_bytes.lstrip()[:5] == b"%PDF-":
+        return JSONResponse(status_code=400, content={"status": "error", "message": "That doesn't look like a PDF file."})
+    try:
+        extracted, err = await run_in_threadpool(extract_fir_fields_local, pdf_bytes)
+    except Exception:
+        logger.error("FIR PDF extraction crashed:\n%s", traceback.format_exc())
+        return JSONResponse(status_code=500, content={"status": "error", "message": "Extraction failed unexpectedly. Check the server log."})
+    if err:
+        return JSONResponse(status_code=422, content={"status": "error", "message": err})
+    return {"status": "success", "fields": extracted}
+
+
+# ==========================================
+# REPORT ANALYSIS PAGE (ported from sihdashboard.py's "Report Analysis")
+# ==========================================
+# Same catalog/tab/module definitions as the Streamlit page. Connectivity is
+# left out on purpose: no metric for it, and the Connectivity_Type column is
+# dropped from every table + the unified report text.
+
+REPORT_CATALOG = {
+    "Case File": [
+        ("FIR Master Record", "complete_fir_dataset.csv", "FIR_No"),
+    ],
+    "Telecom Intelligence": [
+        ("Subscriber Detail Records (SDR)", "Subscriber_Detail_Records.csv", "Case_ID"),
+        ("Call Detail Records (CDR)", "Call_Recording.csv", "Case_ID"),
+        ("Internet Protocol Detail Records (IPDR)", "IP_Detail_Records.csv", "Case_ID"),
+    ],
+    "Vehicle & Location Intelligence": [
+        ("Vehicle Summary", "Vehicle_Summary.csv", "Case_ID"),
+        ("VAHAN Registration Database", "VAHAN_Database.csv", "Case_ID"),
+        ("SARATHI Driving License Database", "SARATHI_Database.csv", "Case_ID"),
+        ("FASTag Toll Logs", "FASTag_Toll_Logs.csv", "Case_ID"),
+        ("ANPR Camera Feeds", "ANPR_Camera_Feeds.csv", "Case_ID"),
+    ],
+    "Financial & Banking Intelligence": [
+        ("Financial Intelligence Summary", "Financial_Summary.csv", "Case_ID"),
+        ("Bank Statement Records", "Bank_Statement_Records.csv", "Case_ID"),
+        ("UPI Payment Gateway Logs", "UPI_Payment_Gateway_Logs.csv", "Case_ID"),
+        ("Merchant Gateway Transaction Logs", "Merchant_Gateway_Transaction_Logs.csv", "Case_ID"),
+    ],
+    "Cryptocurrency Intelligence": [
+        ("On-Chain Crypto Transactions", "Crypto_OnChain_Transactions.csv", "Case_ID"),
+        ("Crypto Exchange KYC Records", "Crypto_Exchange_KYC_Records.csv", "Case_ID"),
+        ("Crypto Exchange On/Off-Ramp Logs", "Crypto_Exchange_OnOffRamp_Logs.csv", "Case_ID"),
+    ],
+    "Corporate & Tax Intelligence": [
+        ("ITR Forensic Profile", "ITR_Forensic_Profile.csv", "Case_ID"),
+        ("GST E-Way Bill Records", "GST_EWayBill_Records.csv", "Case_ID"),
+        ("CIBIL Commercial Credit Report", "CIBIL_Commercial_Credit_Report.csv", "Case_ID"),
+        ("RoC Shell Company Filings", "RoC_Shell_Company_Filings.csv", "Case_ID"),
+    ],
+    "Medico-Legal & Forensic Reports": [
+        ("Medical Forensic Summary", "Medical_Forensic_Summary.csv", "Case_ID"),
+        ("MLC / Clinical Assault Reports", "MLC_Clinical_Assault_Reports.csv", "Case_ID"),
+        ("Post-Mortem / Autopsy Reports", "PostMortem_Autopsy_Reports.csv", "Case_ID"),
+        ("Forensic Toxicology Reports", "Forensic_Toxicology_Reports.csv", "Case_ID"),
+        ("DNA Profiling Reports", "DNA_Profiling_Reports.csv", "Case_ID"),
+        ("SAFE Reports", "SAFE_Reports.csv", "Case_ID"),
+        ("Forensic Odontology Reports", "Forensic_Odontology_Reports.csv", "Case_ID"),
+        ("Skeletal Identification Reports", "Skeletal_Identification_Reports.csv", "Case_ID"),
+        ("Forensic Psychiatric Reports", "Forensic_Psychiatric_Reports.csv", "Case_ID"),
+    ],
+}
+
+# -----------------------------------------------------------------------------
+# REPORT ANALYSIS — TAB GROUPING
+# -----------------------------------------------------------------------------
+# The "Report Analysis" page (formerly "Reports & Analysis") groups the same
+# REPORT_CATALOG data into 5 tabs, in the order the case file is actually
+# worked in an investigation: Case File -> Medical Forensic -> Financial
+# Forensic -> Non-Media Forensic -> Multimedia Digital Forensic. Each tab
+# lists the REPORT_CATALOG categories that belong to it ("sections") plus any
+# forensic modules that are on the roadmap but not yet wired to a real data
+# source ("under_construction" — rendered as disabled placeholder cards
+# instead of a working report button).
+# -----------------------------------------------------------------------------
+REPORT_TABS = {
+    "Case File": {
+        "sections": ["Case File"],
+        "under_construction": [],
+    },
+    "Medical Forensic": {
+        "sections": ["Medico-Legal & Forensic Reports"],
+        "under_construction": [],
+    },
+    "Financial Forensic": {
+        "sections": [
+            "Financial & Banking Intelligence",
+            "Cryptocurrency Intelligence",
+            "Corporate & Tax Intelligence",
+        ],
+        "under_construction": [],
+    },
+    "Non-Media Forensic": {
+        # Telecom & Vehicle/Location Intelligence already have real generated
+        # reports (left exactly as they were). The remaining digital-forensics
+        # artifact categories are on the roadmap only, so they render as
+        # "under construction" placeholders instead of report buttons.
+        "sections": [
+            "Telecom Intelligence",
+            "Vehicle & Location Intelligence",
+        ],
+        # Single source of truth shared with main_investigation_pipeline.py's
+        # unified report generator (section 7) — see the import at the top of
+        # this file.
+        "under_construction": NON_MEDIA_FORENSIC_UNDER_CONSTRUCTION,
+    },
+    "Multimedia Digital Forensic": {
+        "sections": [],
+        # Shared with main_investigation_pipeline.py's unified report
+        # generator (section 8) — see the import at the top of this file.
+        "under_construction": MULTIMEDIA_FORENSIC_UNDER_CONSTRUCTION,
+    },
+}
+
+# Flat list of every "under construction" forensic module across all tabs —
+# used to annotate the Full Unified Investigation Report section so it's
+# clear those artifact types are not yet part of the generated report either.
+UNDER_CONSTRUCTION_MODULES = [
+    item
+    for tab in REPORT_TABS.values()
+    for item in tab["under_construction"]
+]
+
+# -----------------------------------------------------------------------------
+# REPORT TAB ICONS — small inline-SVG set, used instead of emoji
+# -----------------------------------------------------------------------------
+# Each module in ANALYSIS_MODULES used to carry an emoji as its "icon".
+# These are plain line-icons (stroke="currentColor", so they inherit
+# whatever color the surrounding text/button already has — including the
+# dulled "under construction" color) instead. If a module doesn't map to a
+# sensible icon, RPT_ICON.get() below just returns "" and the module name
+# renders with no icon rather than a mismatched or made-up one.
+# -----------------------------------------------------------------------------
+def _rpt_icon(inner: str, filled: bool = False) -> str:
+    stroke = 'fill="none" stroke="currentColor" stroke-width="1.6"' if not filled else 'fill="currentColor" stroke="none"'
+    return (f'<svg class="rpt-icon" viewBox="0 0 24 24" width="15" height="15" '
+            f'{stroke} stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{inner}</svg>')
+
+RPT_ICON = {
+    "medical":  _rpt_icon('<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>'),
+    "bandage":  _rpt_icon('<rect x="3" y="10" width="18" height="4" rx="2" transform="rotate(-25 12 12)"/>'
+                          '<line x1="9" y1="9" x2="9" y2="15" transform="rotate(-25 12 12)"/>'
+                          '<line x1="15" y1="9" x2="15" y2="15" transform="rotate(-25 12 12)"/>'),
+    "clipboard": _rpt_icon('<rect x="5" y="4" width="14" height="17" rx="2"/><rect x="9" y="2.5" width="6" height="3" rx="1"/>'
+                           '<path d="M8 10h8M8 13.5h8M8 17h5"/>'),
+    "flask":    _rpt_icon('<path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9V3"/><path d="M8 15h8"/>'),
+    "dna":      _rpt_icon('<path d="M7 3c0 6 10 12 10 18M17 3c0 6-10 12-10 18"/><path d="M8 7h8M7.3 12h9.4M8 17h8"/>'),
+    "shield":   _rpt_icon('<path d="M12 3l7 3v6c0 5-3.5 8-7 9-3.5-1-7-4-7-9V6z"/><path d="M9 12l2 2 4-4"/>'),
+    "tooth":    _rpt_icon('<path d="M6 4c0 2-1.5 2.5-1.5 5.5 0 2.5 1 3.5 1.2 6 .2 2 .8 3.5 1.8 3.5s1-2 1.5-4c.3-1.2.7-1.7 1-1.7'
+                          's.7.5 1 1.7c.5 2 .5 4 1.5 4s1.6-1.5 1.8-3.5c.2-2.5 1.2-3.5 1.2-6C15.5 6.5 14 6 14 4'
+                          'c0-1.1-1-2-2-2H8c-1 0-2 .9-2 2z"/>'),
+    "bone":     _rpt_icon('<circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="18" r="2.4"/><line x1="7.8" y1="7.8" x2="16.2" y2="16.2"/>'),
+    "brain":    _rpt_icon('<path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 5h1a3 3 0 0 0 3-3V7a3 3 0 0 0-1-3z"/>'
+                          '<path d="M15 4a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 5h-1a3 3 0 0 1-3-3V7a3 3 0 0 1 1-3z"/>'),
+    "card":     _rpt_icon('<rect x="3" y="6" width="18" height="13" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="6" y1="15" x2="10" y2="15"/>'),
+    "coin":     _rpt_icon('<circle cx="12" cy="12" r="8.5"/><path d="M12 8v8M9.5 9.5h4a1.6 1.6 0 0 1 0 3.2h-3a1.6 1.6 0 0 0 0 3.2h4.5"/>'),
+    "building": _rpt_icon('<rect x="5" y="3" width="14" height="18" rx="1"/>'
+                          '<path d="M9 7h1M14 7h1M9 11h1M14 11h1M9 15h1M14 15h1"/><path d="M10 21v-4h4v4"/>'),
+    "signal":   _rpt_icon('<path d="M4 20V14M9 20V10M14 20V6M19 20V3"/>'),
+    "car":      _rpt_icon('<path d="M4 16l1.5-5A2 2 0 0 1 7.4 9.5h9.2A2 2 0 0 1 18.5 11l1.5 5"/>'
+                          '<rect x="3" y="16" width="18" height="4" rx="1.5"/><circle cx="7.5" cy="20" r="1.4"/><circle cx="16.5" cy="20" r="1.4"/>'),
+    "chip":     _rpt_icon('<rect x="7" y="7" width="10" height="10" rx="1.5"/>'
+                          '<path d="M9 3v3M12 3v3M15 3v3M9 18v3M12 18v3M15 18v3M3 9h3M3 12h3M3 15h3M18 9h3M18 12h3M18 15h3"/>'),
+    "folder":   _rpt_icon('<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2h9A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/>'),
+    "globe":    _rpt_icon('<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>'),
+    "pin":      _rpt_icon('<path d="M12 21s7-6.5 7-12a7 7 0 1 0-14 0c0 5.5 7 12 7 12z"/><circle cx="12" cy="9" r="2.4"/>'),
+    "drive":    _rpt_icon('<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>'),
+    "compass":  _rpt_icon('<circle cx="12" cy="12" r="9"/><path d="M15 9l-2 6-6 2 2-6z"/>'),
+    "plug":     _rpt_icon('<path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-6 6 6 6 0 0 1-6-6z"/><path d="M12 17v4"/>'),
+    "chat":     _rpt_icon('<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v9A1.5 1.5 0 0 1 18.5 16H9l-4 4v-4H5.5A1.5 1.5 0 0 1 4 14.5z"/>'),
+    "waveform": _rpt_icon('<rect x="3" y="11" width="2" height="4"/><rect x="7" y="7" width="2" height="12"/>'
+                          '<rect x="11" y="3" width="2" height="20"/><rect x="15" y="8" width="2" height="10"/>'
+                          '<rect x="19" y="10" width="2" height="6"/>', filled=True),
+    "video":    _rpt_icon('<rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3z"/>'),
+    "image":    _rpt_icon('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.7"/>'
+                          '<path d="M21 16l-5.5-5.5a2 2 0 0 0-2.8 0L5 18"/>'),
+}
+
+# -----------------------------------------------------------------------------
+# ANALYSIS SUB-TAB — evidence upload modules + accepted file types
+# -----------------------------------------------------------------------------
+# Each of the 4 forensic tabs (Medical / Financial / Non-Media / Multimedia)
+# gets an "Analysis" sub-tab where raw evidence can be uploaded per module.
+# Accepted extensions below are taken directly from the forensic reference
+# sheet's "Accepted File Formats for Analysis" table where that module
+# appears in it. Modules the sheet doesn't cover fall back to PDF (or, for
+# clearly tabular financial records, PDF/CSV/XLSX) as instructed.
+# Format: (module_name, icon, [accepted extensions, no dots]).
+# -----------------------------------------------------------------------------
+ANALYSIS_MODULES = {
+    "Medical Forensic": [
+        ("Medical Forensic Summary", RPT_ICON["medical"], ["pdf"]),
+        ("MLC / Clinical Assault Reports", RPT_ICON["bandage"], ["pdf"]),
+        ("Post-Mortem / Autopsy Reports", RPT_ICON["clipboard"], ["pdf"]),
+        ("Forensic Toxicology Reports", RPT_ICON["flask"], ["pdf"]),
+        ("DNA Profiling Reports", RPT_ICON["dna"], ["pdf"]),
+        ("SAFE Reports", RPT_ICON["shield"], ["pdf"]),
+        ("Forensic Odontology Reports", RPT_ICON["tooth"], ["pdf"]),
+        ("Skeletal Identification Reports", RPT_ICON["bone"], ["pdf"]),
+        ("Forensic Psychiatric Reports", RPT_ICON["brain"], ["pdf"]),
+    ],
+    "Financial Forensic": [
+        # Not covered by the reference sheet — bank/UPI/GST/ITR style records
+        # are most commonly shared as statements (PDF) or exports (CSV/XLSX).
+        ("Financial & Banking Intelligence", RPT_ICON["card"], ["pdf", "csv", "xlsx"]),
+        ("Cryptocurrency Intelligence", RPT_ICON["coin"], ["pdf", "csv", "xlsx"]),
+        ("Corporate & Tax Intelligence", RPT_ICON["building"], ["pdf", "csv", "xlsx"]),
+    ],
+    "Non-Media Forensic": [
+        # Telecom / Vehicle & Location already have live synthetic reports;
+        # closest sheet matches used for their accepted upload types.
+        ("Telecom Intelligence", RPT_ICON["signal"], ["csv", "xml", "json"]),
+        ("Vehicle & Location Intelligence", RPT_ICON["car"], ["csv", "xlsx", "kml", "gpx", "json"]),
+        ("Volatile Memory Forensics", RPT_ICON["chip"], ["raw", "dmp", "mem", "lime", "vmem"]),
+        ("OS & Registry Artifacts", RPT_ICON["folder"], ["dat", "lnk", "pf", "reg"]),
+        ("Network & Internet Logs", RPT_ICON["globe"], ["pcap", "pcapng", "log", "txt", "csv"]),
+        ("Location & Sensor Data", RPT_ICON["pin"], ["csv", "xlsx", "kml", "gpx", "json"]),
+        ("File System Artifacts", RPT_ICON["drive"], ["e01", "raw", "dd", "aff4"]),
+        # Not covered by the sheet — browser/app artifacts are typically
+        # SQLite databases or exported JSON.
+        ("Browser & App Artifacts", RPT_ICON["compass"], ["db", "sqlite", "json"]),
+        ("Hardware & Peripheral Logs", RPT_ICON["plug"], ["log", "spl", "shd"]),
+    ],
+    "Multimedia Digital Forensic": [
+        ("Chats Analysis", RPT_ICON["chat"], ["db", "sqlite", "crypt14", "crypt15", "xml", "json", "ufdr"]),
+        ("Audio Analysis", RPT_ICON["waveform"], ["wav", "mp3", "opus", "m4a", "aac", "amr", "flac"]),
+        ("Video Analysis", RPT_ICON["video"], ["mp4", "mov", "avi", "dav"]),
+        ("Image Analysis", RPT_ICON["image"], ["jpg", "jpeg", "png", "heic", "dng", "raw", "cr2", "nef"]),
+    ],
+}
+
+
+REPORT_FILE_LOOKUP = {
+    filename: (display_name, case_col)
+    for reports in REPORT_CATALOG.values()
+    for display_name, filename, case_col in reports
+}
+UNIFIED_REPORT_PATH = "FINAL_GOVERNMENT_CASE_INVESTIGATION_REPORT.txt"
+_CONNECTIVITY_LINE = re.compile(r"^.*connectivity[ _]?type.*\n?", re.IGNORECASE | re.MULTILINE)
+
+# module name -> analyzer + how to build its "Use Sample Evidence" fixture.
+# (audio's sample is a pre-generated file, see _get_sample_file)
+FORENSIC_ANALYZERS = {
+    "Chats Analysis": {"fn": analyze_chat_file, "ext": "db", "gen": generate_fixture_db},
+    "Video Analysis": {"fn": analyze_video_file, "ext": "mp4", "gen": generate_video_fixture},
+    "Audio Analysis": {"fn": analyze_audio_basic, "ext": "wav", "gen": None},
+    "Image Analysis": {"fn": analyze_image_file, "ext": "jpg", "gen": generate_image_fixture},
+}
+AUDIO_SAMPLE_PATH = "sample_evidence/FIR/2026/0001/audio/test.wav"
+FORENSIC_RUNS_DIR = os.path.join(_BASE_DIR, "forensic_runs")
+MAX_STORED_RUNS = 20
+
+
+class _UploadedBlob(io.BytesIO):
+    """Stand-in for Streamlit's UploadedFile (a BytesIO with .name/.size/.type),
+    which is what the analyze_* functions were written against."""
+    def __init__(self, data, name):
+        super().__init__(data)
+        self.name = name
+        self.size = len(data)
+        self.type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+
+def _json_safe(obj, _depth=0):
+    """Analyzer results can hold numpy values, timestamps, raw PNG bytes
+    (thumbnails/spectrograms), PIL images or matplotlib figures. Turns all
+    of that into plain JSON, with images as data: URIs the page can <img>."""
+    if _depth > 12:
+        return str(obj)
+    if obj is None or isinstance(obj, (bool, int, str)):
+        return obj
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj) if math.isfinite(float(obj)) else None
+    if isinstance(obj, np.ndarray):
+        return _json_safe(obj.tolist(), _depth + 1)
+    if isinstance(obj, (bytes, bytearray)):
+        b = bytes(obj)
+        mime = "image/png" if b[:4] == b"\x89PNG" else "image/jpeg" if b[:2] == b"\xff\xd8" else None
+        if mime:
+            return f"data:{mime};base64," + base64.b64encode(b).decode("ascii")
+        return f"<{len(b)} bytes>"
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v, _depth + 1) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_json_safe(v, _depth + 1) for v in obj]
+    if isinstance(obj, pd.DataFrame):
+        return _json_safe(obj.to_dict("records"), _depth + 1)
+    if isinstance(obj, (datetime, date, pd.Timestamp)):
+        return obj.isoformat()
+    if hasattr(obj, "savefig"):  # matplotlib figure
+        buf = io.BytesIO()
+        obj.savefig(buf, format="png", bbox_inches="tight")
+        return _json_safe(buf.getvalue(), _depth + 1)
+    if hasattr(obj, "save") and hasattr(obj, "size"):  # PIL image
+        buf = io.BytesIO()
+        obj.save(buf, format="PNG")
+        return _json_safe(buf.getvalue(), _depth + 1)
+    return str(obj)
+
+
+def _drop_images(obj):
+    """Stored runs keep everything except the (big) embedded images."""
+    if isinstance(obj, str):
+        return "[image omitted]" if obj.startswith("data:image") else obj
+    if isinstance(obj, dict):
+        return {k: _drop_images(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_drop_images(v) for v in obj]
+    return obj
+
+
+def _runs_file(case_id, module_name):
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", f"{case_id}__{module_name}").strip("_")
+    return os.path.join(FORENSIC_RUNS_DIR, f"{slug}.json")
+
+
+def _load_runs(case_id, module_name):
+    path = _runs_file(case_id, module_name)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_run(case_id, module_name, entry):
+    os.makedirs(FORENSIC_RUNS_DIR, exist_ok=True)
+    runs = (_load_runs(case_id, module_name) + [entry])[-MAX_STORED_RUNS:]
+    with open(_runs_file(case_id, module_name), "w", encoding="utf-8") as f:
+        json.dump(runs, f, ensure_ascii=False)
+
+
+def _call_analyzer(analyze_fn, file_obj, case_id, module_name):
+    # I can't see every analyzer's signature from here, so only pass the
+    # extras (tier/case_id/...) a given function actually declares.
+    params = inspect.signature(analyze_fn).parameters
+    extras = {"tier": "basic", "case_id": case_id, "fir_no": case_id, "module_name": module_name}
+    kwargs = {k: v for k, v in extras.items() if k in params}
+    # sihimageanalysis.analyze_image_file(file_bytes, filename) takes raw
+    # bytes + a filename string, unlike Chats/Video/Audio's analyze_fn(file)
+    # which take the file-like object (_UploadedBlob/_FixtureFile) directly.
+    # Without this, Image Analysis errors out (missing 'filename') or gets
+    # handed a file-like object where raw bytes are expected.
+    if module_name == "Image Analysis":
+        return analyze_fn(file_obj.getvalue(), file_obj.name, **kwargs)
+    return analyze_fn(file_obj, **kwargs)
+
+
+def _get_sample_file(case_id, module_name):
+    """Returns (file_obj, None) or (None, reason)."""
+    spec = FORENSIC_ANALYZERS[module_name]
+    if module_name == "Audio Analysis":
+        if _FixtureFile is None:
+            return None, "Sample fixtures aren't available (sihforensicanalysis failed to import)."
+        if not os.path.exists(AUDIO_SAMPLE_PATH):
+            return None, f"Sample audio file not found at '{AUDIO_SAMPLE_PATH}'. Run generate_test_audio.py first."
+        return _FixtureFile(AUDIO_SAMPLE_PATH), None
+    if get_or_create_fixture is None:
+        return None, "Sample fixtures aren't available (sihforensicanalysis failed to import)."
+    fixture = get_or_create_fixture(
+        fir_no=case_id, module_name=module_name, extension=spec["ext"], generator_fn=spec["gen"],
+    )
+    if fixture is None:
+        return None, f"No FIR record found for '{case_id}' - can't generate a case-matched sample. Register/select a real case first."
+    return fixture, None
+
+
+def _read_unified_text():
+    if not os.path.exists(UNIFIED_REPORT_PATH):
+        return None
+    with open(UNIFIED_REPORT_PATH, "r", encoding="utf-8", errors="ignore") as f:
+        return _CONNECTIVITY_LINE.sub("", f.read())
+
+
+@app.get("/api/reports/cases")
+def api_reports_cases():
+    fir_df = get_analytics_data()["fir_df"]
+    if fir_df.empty or "FIR_No" not in fir_df.columns:
+        return {"cases": []}
+    return {"cases": sorted(fir_df["FIR_No"].dropna().astype(str).unique().tolist())}
+
+
+@app.get("/api/reports/case")
+def api_reports_case(case_id: str):
+    fir_df = get_analytics_data()["fir_df"]
+    if fir_df.empty or "FIR_No" not in fir_df.columns:
+        return {"found": False}
+    match = fir_df[fir_df["FIR_No"].astype(str) == str(case_id)]
+    if match.empty:
+        return {"found": False}
+    row = match.iloc[0]
+    return {
+        "found": True,
+        "district": str(row.get("District", "—")),
+        "case_type": str(row.get("Case_Type", "—")),
+        "vulnerability": str(row.get("Vulnerability_Category", "—")),
+    }
+
+
+@app.get("/api/reports/config")
+def api_reports_config():
+    """Tab/section/module layout for the page, plus whether each report CSV
+    has actually been generated on disk yet."""
+    tabs = {}
+    for tab_name, tab in REPORT_TABS.items():
+        tabs[tab_name] = {
+            "sections": [
+                {
+                    "category": cat,
+                    "reports": [
+                        {"name": n, "file": f, "exists": os.path.exists(f)}
+                        for n, f, _c in REPORT_CATALOG[cat]
+                    ],
+                }
+                for cat in tab["sections"]
+            ],
+            "under_construction": list(tab["under_construction"]),
+        }
+    modules = {}
+    for tab_name, mods in ANALYSIS_MODULES.items():
+        modules[tab_name] = []
+        for name, icon, exts in mods:
+            live = tab_name == "Multimedia Digital Forensic" and name in FORENSIC_ANALYZERS
+            entry = {"name": name, "icon": icon, "extensions": exts, "live": live}
+            if live:
+                entry["unavailable"] = None if FORENSIC_ANALYZERS[name]["fn"] else FORENSIC_IMPORT_ERRORS.get(name, "analyzer not available")
+            modules[tab_name].append(entry)
+    return {"tabs": tabs, "modules": modules}
+
+
+@app.get("/api/reports/table")
+def api_reports_table(case_id: str, file: str):
+    entry = REPORT_FILE_LOOKUP.get(file)  # whitelist -- never open an arbitrary path
+    if not entry:
+        return JSONResponse(status_code=404, content={"error": "Unknown report file."})
+    display_name, case_col = entry
+    if not os.path.exists(file):
+        return {"exists": False, "file": file, "display_name": display_name}
+    try:
+        df = read_csv_cached(file)
+    except Exception as e:
+        logger.error("Could not read %s:\n%s", file, traceback.format_exc())
+        return JSONResponse(status_code=500, content={"error": f"Could not read {file}: {e}"})
+    if case_col and case_col in df.columns:
+        df = df[df[case_col].astype(str) == str(case_id)]
+    df = df[[c for c in df.columns if "connectivity_type" not in str(c).lower()]]  # connectivity is never shown to users
+    return {
+        "exists": True, "file": file, "display_name": display_name,
+        "columns": [str(c) for c in df.columns],
+        "rows": _json_safe(df.to_dict("records")),
+        "count": int(len(df)),
+    }
+
+
+@app.get("/api/reports/unified")
+def api_reports_unified(case_id: str):
+    text = _read_unified_text()
+    if text is None:
+        return {"exists": False}
+    idx = text.find(case_id)
+    if idx != -1:
+        label, preview = f"Preview around {case_id}", text[max(0, idx - 200): idx + 4000]
+    else:
+        label, preview = "Preview (case marker not found — showing report head)", text[:4000]
+    return {
+        "exists": True, "label": label, "preview": preview,
+        "under_construction": UNDER_CONSTRUCTION_MODULES,
+    }
+
+
+@app.get("/api/reports/unified/download")
+def api_reports_unified_download():
+    text = _read_unified_text()
+    if text is None:
+        return JSONResponse(status_code=404, content={"error": "The unified report hasn't been generated yet."})
+    return Response(
+        content=text.encode("utf-8"), media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{UNIFIED_REPORT_PATH}"'},
+    )
+
+
+@app.get("/api/reports/runs")
+def api_reports_runs(case_id: str, module: str):
+    if module not in FORENSIC_ANALYZERS:
+        return {"runs": []}
+    return {"runs": _load_runs(case_id, module)}
+
+
+@app.post("/api/reports/analyze")
+async def api_reports_analyze(request: Request, case_id: str, module: str, filename: str = "", sample: bool = False):
+    """Runs one Multimedia analyzer. Body = raw file bytes (or empty when
+    sample=true, which builds a case-matched fixture instead)."""
+    spec = FORENSIC_ANALYZERS.get(module)
+    if not spec:
+        return JSONResponse(status_code=404, content={"message": f"'{module}' has no analyzer wired up."})
+    if not spec["fn"]:
+        return JSONResponse(status_code=503, content={"message": f"{module} isn't available: {FORENSIC_IMPORT_ERRORS.get(module, 'analyzer failed to import')}"})
+
+    try:
+        if sample:
+            file_obj, reason = await run_in_threadpool(_get_sample_file, case_id, module)
+            if file_obj is None:
+                return JSONResponse(status_code=404, content={"message": reason})
+            used_name = getattr(file_obj, "name", "sample")
+        else:
+            data = await request.body()
+            if not data:
+                return JSONResponse(status_code=400, content={"message": "No file received."})
+            allowed = next((e for n, _i, e in ANALYSIS_MODULES["Multimedia Digital Forensic"] if n == module), [])
+            ext = os.path.splitext(filename)[1].lstrip(".").lower()
+            if ext not in allowed:
+                return JSONResponse(status_code=400, content={"message": f"'.{ext}' isn't an accepted type for {module}."})
+            used_name = os.path.basename(filename) or f"upload.{ext}"
+            file_obj = _UploadedBlob(data, used_name)
+
+        raw = await run_in_threadpool(_call_analyzer, spec["fn"], file_obj, case_id, module)
+    except Exception:
+        logger.error("%s failed:\n%s", module, traceback.format_exc())
+        return JSONResponse(status_code=500, content={"message": f"{module} hit an error. Check the server log for details."})
+
+    result = _json_safe(raw)
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    try:
+        _save_run(case_id, module, {
+            "uploaded_at": stamp, "filename": os.path.basename(str(used_name)),
+            "sample": bool(sample), "result": _drop_images(result),
+        })
+    except Exception:
+        logger.warning("Couldn't persist %s run:\n%s", module, traceback.format_exc())
+    return {"uploaded_at": stamp, "filename": os.path.basename(str(used_name)), "result": result}
+
+
+
+
+# ==========================================
+# DEMO-ONLY: scripted answers for the Case Basket AI Assistant
+# ==========================================
+# HARD-CODED FOR DEMO PURPOSES ONLY.
+# For the hackathon walkthrough we want guaranteed, polished answers for a
+# few well-known SOP topics instead of depending on the local Ollama/Chroma
+# RAG stack (which is slow/flaky and needs a populated vector DB to look
+# good on stage). Any query containing one of the keywords below is
+# answered from this fixed script instead of being sent to sop_run_query().
+# Everything else still goes through the real RAG pipeline untouched.
+#
+# TODO (post-demo): remove this block and DEMO_MODE flag once the real
+# ./legal_vector_db is populated with the full SOP/legal corpus and has
+# been validated to answer these same questions well on its own.
+DEMO_MODE = True
+
+DEMO_SOP_ANSWERS = [
+    {
+        "keywords": ["evidence"],
+        "answer": (
+            "**Chain of Custody & Evidence Handling — SOP Summary**\n\n"
+            "1. **Scene Cordoning:** The Investigating Officer (IO) must immediately seal and secure the crime scene. "
+            "All personnel must wear forensic PPE (gloves, hairnets, shoe covers) to prevent contamination.\n\n"
+            "2. **Mandatory Videography (Section 105 BNSS):** The entire search and seizure must be recorded on video. "
+            "Tools like e-Sakshya are used to capture location-tagged photos/videos for trial authenticity.\n\n"
+            "3. **Seizure Memo & Witnesses:** Evidence must be collected in the presence of at least two independent "
+            "witnesses (panchas). A detailed Seizure Memo (Panchnama) must be prepared and signed by the IO and witnesses.\n\n"
+            "4. **Tamper-Evident Packaging:** Items must be packed appropriately (porous bags for biological samples, "
+            "anti-static bags for digital devices), sealed with official wax seals, and labeled with crime numbers.\n\n"
+            "5. **Chain of Custody Log:** An uninterrupted log must track every individual who handles, moves, or "
+            "inspects the item, with dates, times, officer names, and reasons for transfer.\n\n"
+            "6. **Malkhana Storage:** Evidence is stored in the police station's secure vault (Malkhana) and catalogued "
+            "under the custodian's supervision. Sensitive items (weapons, narcotics, digital hardware) go into "
+            "specialized compartments.\n\n"
+            "7. **Digital/Biological Protocols:** Digital media is protected in Faraday bags; hash values "
+            "(MD5/SHA-256) are generated on-scene to prove data integrity in court.\n\n"
+            "*(Source: Excerpt 1 — SOP Manual, Section: Chain of Custody & Handling of Evidence)*"
+        ),
+        "source_title": "Chain of Custody & Handling of Evidence",
+    },
+    {
+        "keywords": ["forensic"],
+        "answer": (
+            "**Forensic Analysis — SOP Summary**\n\n"
+            "1. **Formal Requisition:** The IO must issue a formal requisition letter specifying required tests "
+            "(DNA, ballistics, toxicology), routed through the jurisdictional Magistrate for legal authority.\n\n"
+            "2. **Mandatory FSL Scene Visits (Section 176(3) BNSS):** For offenses punishable by 7+ years, forensic "
+            "experts must visit the crime scene directly to collect biological, chemical, or trace evidence.\n\n"
+            "3. **Seal Verification:** On arrival at the FSL, examiners inspect external seals against paperwork and "
+            "photos. Broken or inconsistent seals trigger a chain-of-custody breach and the parcel is rejected.\n\n"
+            "4. **Standard Operating Procedures:** Accredited, standardized methods are used (e.g. GC-MS for poisons, "
+            "automated fingerprint identification) to ensure reproducible, legally sound results.\n\n"
+            "5. **Digital & Cyber Forensics:** Phones, hard drives, and cloud dumps are cloned using write-blockers to "
+            "produce bit-stream images without altering originals; hash values are cross-checked against baselines.\n\n"
+            "6. **Forensic Report (Section 329 BNSS):** The examiner drafts a comprehensive expert opinion with "
+            "methodology, control samples, and conclusions — admissible without requiring immediate oral testimony.\n\n"
+            "7. **Return of Remnants:** Unused sample material is re-sealed with official FSL stamps and returned to "
+            "the Malkhana for possible independent defense testing or judicial inspection.\n\n"
+            "*(Source: Excerpt 1 — SOP Manual, Section: Forensic Analysis)*"
+        ),
+        "source_title": "Forensic Analysis",
+    },
+    {
+        "keywords": ["investigation"],
+        "answer": (
+            "**Investigation — SOP Summary**\n\n"
+            "1. **Registration of FIR (Section 173 BNSS):** Investigation formally begins on receiving information "
+            "about a cognizable offense. A preliminary enquiry (up to 14 days) may precede registration in specified cases.\n\n"
+            "2. **Crime Scene Preservation:** The IO arrives promptly, establishes a perimeter, requests forensic "
+            "support, and drafts a preliminary inspection report of boundaries, entry/exit points, and tracks.\n\n"
+            "3. **Examination of Witnesses (Section 180 BNSS, formerly 161 CrPC):** Witness/victim/informant statements "
+            "are recorded, often with audio-video to prevent retraction or coercion claims.\n\n"
+            "4. **Search & Seizure:** Conducted under judicial warrants or emergency provisions, with independent "
+            "witnesses and mandatory video recording.\n\n"
+            "5. **Suspect Interrogation & Arrest:** Must follow constitutional safeguards — relatives informed, medical "
+            "examination conducted, and the arrested person produced before a Magistrate within 24 hours.\n\n"
+            "6. **Supplementary Intelligence:** CDRs, IPDRs, CCTV footage, and financial trails are collected to "
+            "establish location, connectivity, and premeditation objectively.\n\n"
+            "7. **Final Report (Section 193 BNSS):** The IO reviews all evidence and files either a Chargesheet "
+            "(sufficient evidence) or a Closure Report (unsubstantiated allegations).\n\n"
+            "*(Source: Excerpt 1 — SOP Manual, Section: Investigation)*"
+        ),
+        "source_title": "Investigation",
+    },
+]
+
+
+def _match_demo_answer(query: str):
+    """Case-insensitive keyword match against DEMO_SOP_ANSWERS. Returns the
+    first matching entry, or None. Checked BEFORE the real RAG pipeline."""
+    q = query.lower()
+    for entry in DEMO_SOP_ANSWERS:
+        if any(kw in q for kw in entry["keywords"]):
+            return entry
+    return None
+
+
+@app.post("/api/assistant/ask")
+def api_assistant_ask(payload: dict = Body(...)):
+    """AI Assistant chat, backed by sihsoprag.py's SOP/legal RAG pipeline
+    (Ollama + Chroma, same as sihdashboard.py's sidebar widget). The
+    chat UI on the Case Basket page (initializeChatUI()/sendChatMessage() in
+    dashboard-integration.js) already posts {query: "..."} here and renders
+    {answer, sources: [{title, page}]} or the service_unavailable shape --
+    both are preserved below.
+
+    DEMO_MODE: a small set of keyword-triggered questions (Evidence /
+    Forensic / Investigation) are answered from a fixed script instead of
+    the live RAG pipeline -- see DEMO_SOP_ANSWERS above. This is invisible
+    to the caller: the response shape is identical either way."""
+    query = str(payload.get("query") or "").strip()
+    if not query:
+        return JSONResponse(status_code=400, content={"error": "empty_query", "message": "Please enter a question."})
+
+    if DEMO_MODE:
+        demo = _match_demo_answer(query)
+        if demo:
+            return {
+                "answer": demo["answer"],
+                "sources": [{"title": demo["source_title"], "page": "SOP Manual"}],
+            }
+
+    vectorstore, llm, load_error = get_sop_rag_components()
+    if load_error:
+        return {"error": "service_unavailable", "message": load_error}
+
+    answer, strong_hits, all_hits, run_error = sop_run_query(vectorstore, llm, query)
+    if run_error:
+        logger.error("SOP/Legal RAG query failed: %s", run_error)
+        return {
+            "error": "service_unavailable",
+            "message": "The SOP/legal assistant hit an error answering that question. Please try again.",
+        }
+
+    sources = [
+        {"title": f"Excerpt {i}", "page": f"match score {score:.2f}"}
+        for i, (doc, score) in enumerate(strong_hits, start=1)
+    ]
+    return {"answer": answer, "sources": sources}
+
+
+# ==========================================
+# 3. HTML / CSS / JS FRONTEND DASHBOARD
+# ==========================================
+
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="hi">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CCTNS 2.0</title>
+<title>CIPHER 2.0</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<!-- Leaflet is served locally from /static (same pattern as chart.umd.min.js
+     below) because this environment cannot reach any CDN (unpkg.com,
+     cdnjs.cloudflare.com) -- see ensure_leaflet_assets() near app startup,
+     which downloads these two files into ./static/ once, the first time
+     the server has network access, and then serves them locally forever
+     after. No integrity hash needed for same-origin static files. -->
+<link rel="stylesheet" href="/static/leaflet/leaflet.css">
+<script src="/static/leaflet/leaflet.js"></script>
+<script src="/static/js/chart.umd.min.js"></script>
+<!-- Zoom/pan for the Interactive Multi-Event Chronology Chart (Timeline tab).
+     Vendored locally by ensure_chartjs_zoom_asset() for the same
+     no-CDN-access reason as chart.umd.min.js above. If the file hasn't been
+     fetched yet (server never had internet access), this 404s quietly and
+     the chart just renders without zoom -- see zoomChronologyChart() in
+     dashboard-integration.js, which no-ops if the plugin never registered. -->
+<script src="/static/js/chartjs-plugin-zoom.umd.min.js"></script>
 <style>
   :root{
     --purple-900:#341c5e; --purple-800:#432a72; --purple-700:#5a3a92; --purple-600:#6d47ab;
@@ -16,11 +2365,21 @@
     --ink:#241a38; --muted:#786f92; --line:#e4defa; --bg:#f3f0fb; --card:#ffffff;
     --radius:10px; --shadow:0 1px 2px rgba(52,28,94,.06), 0 4px 14px rgba(52,28,94,.06);
     font-family:'Noto Sans Devanagari','Inter',sans-serif;
+    color-scheme: light;
   }
   *{box-sizing:border-box;}
   body{margin:0;background:var(--bg);color:var(--ink);font-size:14px;}
   button{font-family:inherit;cursor:pointer;}
   input,select,textarea{font-family:inherit;}
+  /* Without an explicit color-scheme, browsers render the native <select>
+     popup list using the OS/browser dark theme (black background, near-
+     invisible text) even though the closed box is styled light via
+     background-color above -- that mismatch is the "turns black" bug.
+     Forcing light here + explicit option colors fixes every dropdown on
+     the page, not just the pill-selects. */
+  select{color-scheme:light;}
+  select option{background:#ffffff;color:var(--ink);}
+  .pill-select option{background:#ffffff;color:var(--purple-900);}
   a{text-decoration:none;color:inherit;}
 
   .topbar{height:60px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 18px;position:sticky;top:0;z-index:50;}
@@ -33,7 +2392,7 @@
   .top-icon svg{width:17px;height:17px;}
   .dot-badge{position:absolute;top:-3px;right:-3px;width:8px;height:8px;border-radius:50%;background:var(--red);border:2px solid #fff;}
   .login-time{font-size:11.5px;color:var(--muted);white-space:nowrap;}
-  .pill-select{border:1px solid var(--line);background:var(--purple-050);border-radius:8px;padding:6px 10px;font-size:12.5px;color:var(--purple-900);}
+  .pill-select{border:1px solid var(--line);background-color:var(--purple-050);border-radius:8px;padding:6px 26px 6px 10px;font-size:12.5px;color:var(--purple-900);appearance:none;-webkit-appearance:none;-moz-appearance:none;cursor:pointer;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235a3a92' stroke-width='2.5'><path d='M6 9l6 6 6-6'/></svg>");background-repeat:no-repeat;background-position:right 8px center;background-size:11px;}
   .avatar{width:32px;height:32px;border-radius:50%;background:var(--lavender);display:flex;align-items:center;justify-content:center;color:var(--purple-700);font-weight:700;font-size:12px;}
   .lang-toggle{display:flex;border:1px solid var(--purple-700);border-radius:8px;overflow:hidden;}
   .lang-toggle button{border:none;background:#fff;color:var(--purple-700);font-size:12px;font-weight:700;padding:6px 12px;}
@@ -65,6 +2424,28 @@
   .page-head .crumb{font-size:12px;color:var(--muted);}
 
   .card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);border:1px solid var(--line);padding:16px;}
+  /* Case Location map "toggle fullscreen" button (addCaseMapExtraControls)
+     puts the map's .card into the browser's Fullscreen API. The browser
+     only auto-sizes the fullscreened element itself to the viewport; its
+     children (here, #caseLocationMap, which is authored with a fixed
+     height:300px inline style) keep their normal size, so without this the
+     card filled the screen but the map stayed a small 300px box in the
+     corner. This makes the card a full-viewport flex column and lets the
+     map (and Leaflet's own canvas) grow to fill the remaining space; the
+     !important is required to win over the element's inline height. */
+  /* Each vendor-prefixed :fullscreen variant is written as its OWN rule
+     (never comma-grouped with the others). Browsers drop an entire
+     comma-separated selector list the moment ONE selector in the group
+     uses a pseudo-class they don't recognize (e.g. Chromium doesn't know
+     :-ms-fullscreen) -- grouping them together silently killed all three. */
+  .card:fullscreen{display:flex;flex-direction:column;width:100vw;height:100vh;max-width:100vw;max-height:100vh;padding:20px;box-sizing:border-box;overflow:auto;}
+  .card:-webkit-full-screen{display:flex;flex-direction:column;width:100vw;height:100vh;max-width:100vw;max-height:100vh;padding:20px;box-sizing:border-box;overflow:auto;}
+  .card:-ms-fullscreen{display:flex;flex-direction:column;width:100vw;height:100vh;max-width:100vw;max-height:100vh;padding:20px;box-sizing:border-box;overflow:auto;}
+  .card:fullscreen #caseLocationMap{height:auto!important;flex:1 1 auto;min-height:0;}
+  .card:-webkit-full-screen #caseLocationMap{height:auto!important;flex:1 1 auto;min-height:0;}
+  .card:-ms-fullscreen #caseLocationMap{height:auto!important;flex:1 1 auto;min-height:0;}
+  .card:fullscreen .leaflet-container{width:100%;height:100%;}
+  .card:-webkit-full-screen .leaflet-container{width:100%;height:100%;}
   .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px;}
   .stat{border-radius:var(--radius);padding:16px;position:relative;overflow:hidden;border:1px solid var(--line);}
   .stat h3{margin:0 0 6px;font-size:12.5px;color:var(--muted);font-weight:600;}
@@ -133,6 +2514,31 @@
   .tab{padding:10px 16px;font-size:13px;font-weight:600;color:var(--muted);border-bottom:2px solid transparent;cursor:pointer;}
   .tab.active{color:var(--purple-700);border-bottom-color:var(--purple-700);}
 
+  /* Investigation page sub-navigation (was totally unstyled + unwired) */
+  .submenu-nav{display:flex;flex-wrap:wrap;gap:4px;}
+  .submenu-tab{appearance:none;-webkit-appearance:none;background:transparent;border:none;
+    padding:12px 18px;font-size:13px;font-weight:600;font-family:inherit;color:var(--muted);
+    border-bottom:2px solid transparent;cursor:pointer;transition:.15s;}
+  .submenu-tab:hover{color:var(--purple-700);background:var(--purple-050);}
+  .submenu-tab.active{color:var(--purple-700);border-bottom-color:var(--purple-700);background:var(--purple-050);}
+  .page-tab-content{display:none;}
+  .page-tab-content.active{display:block;}
+
+  /* Fixed-height wrapper so Chart.js canvases can't runaway-resize
+     (canvas with no explicitly-sized relative parent + responsive:true
+     causes the classic "chart keeps growing/collapsing" bug). */
+  .chart-box{position:relative;height:260px;}
+  .chart-box canvas{max-height:100%;}
+
+  .pi-alert{border-left:4px solid var(--muted);background:var(--purple-050);border-radius:6px;
+    padding:10px 12px;margin-bottom:8px;font-size:12.5px;}
+  .pi-alert .pi-title{font-weight:700;color:var(--ink);margin-bottom:3px;display:flex;align-items:center;justify-content:space-between;gap:8px;}
+  .pi-alert-icon{flex:0 0 auto;display:inline-block;width:26px;height:26px;}
+  .pi-alert .pi-text{color:var(--muted);line-height:1.5;}
+  .pi-alert.sev-critical,.pi-alert.sev-high{border-left-color:var(--red);}
+  .pi-alert.sev-medium{border-left-color:var(--orange);}
+  .pi-alert.sev-low{border-left-color:var(--blue);}
+
   .modcards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
   .modcard{background:#fff;border:1px solid var(--line);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);}
   .modcard h3{margin:0 0 6px;font-size:14px;color:var(--purple-900);}
@@ -146,6 +2552,32 @@
   .stub{text-align:center;padding:60px 20px;color:var(--muted);}
   .stub svg{width:46px;height:46px;color:var(--purple-600);margin-bottom:12px;}
   .stub h3{color:var(--purple-900);margin:0 0 6px;font-size:15px;}
+
+  /* ---- Case Basket (cb-*) ---- */
+  .cb-firbar{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;}
+  .cb-firbar .field{margin:0;min-width:240px;flex:1;max-width:360px;}
+  .cb-firbar .field label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;}
+  .cb-firmeta{font-size:12px;color:var(--muted);padding-bottom:9px;}
+  .cb-firmeta b{color:var(--purple-900);}
+  .cb-empty{text-align:center;padding:50px 20px;color:var(--muted);}
+  .cb-empty svg{width:40px;height:40px;color:var(--purple-600);margin-bottom:10px;}
+  .cb-empty h3{color:var(--purple-900);margin:0 0 6px;font-size:14.5px;}
+
+  .cb-progress-row{display:flex;align-items:center;gap:12px;margin-bottom:4px;}
+  .cb-progress-track{flex:1;height:8px;border-radius:20px;background:var(--purple-050);border:1px solid var(--line);overflow:hidden;}
+  .cb-progress-fill{height:100%;background:linear-gradient(90deg,var(--green),#5cc98a);border-radius:20px;transition:width .2s;}
+  .cb-progress-label{font-size:12px;font-weight:700;color:var(--purple-900);white-space:nowrap;}
+
+  .checklist{display:flex;flex-direction:column;gap:8px;margin-top:14px;}
+  .checklist-item{display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:9px;background:#fff;}
+  .checklist-item .ci-icon{flex:none;width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--purple-050);color:var(--muted);border:1.5px solid var(--line);}
+  .checklist-item.done .ci-icon{background:#e1f4e9;color:var(--green);border-color:#cdeedb;}
+  .checklist-item .ci-icon svg{width:14px;height:14px;}
+  .checklist-item .ci-body{flex:1;min-width:0;}
+  .checklist-item .ci-title{font-size:13px;font-weight:700;color:var(--ink);}
+  .checklist-item .ci-sub{font-size:11.8px;color:var(--muted);margin-top:2px;line-height:1.5;}
+  .checklist-item .ci-status{flex:none;font-size:10.8px;font-weight:700;padding:3px 10px;border-radius:20px;background:var(--purple-050);color:var(--muted);white-space:nowrap;}
+  .checklist-item.done .ci-status{background:#e1f4e9;color:var(--green);}
 
   .stepper{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap;}
   .step-pill{padding:7px 12px;border-radius:20px;font-size:11.5px;font-weight:600;background:var(--purple-050);color:var(--muted);border:1px solid var(--line);}
@@ -163,15 +2595,57 @@
     .form-grid{grid-template-columns:1fr 1fr;}
     .modcards{grid-template-columns:1fr 1fr;}
   }
+
+  /* ---- Report Analysis page + FIR PDF-upload tab (rpt-*) ---- */
+  .rpt-info{background:var(--purple-050);border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:12.5px;color:var(--purple-800);margin-bottom:14px;line-height:1.5;}
+  .rpt-alert{border-radius:8px;padding:10px 12px;font-size:12.5px;margin:8px 0;border:1px solid var(--line);}
+  .rpt-alert.warn{background:#fff6e6;border-color:#f3dcae;color:#7a5410;}
+  .rpt-alert.err{background:#fdecee;border-color:#f3c6cc;color:#9c2434;}
+  .rpt-alert.ok{background:#e7f6ee;border-color:#cdeedb;color:#1f7a49;}
+  .rpt-alert.info{background:var(--purple-050);color:var(--purple-800);}
+  .rpt-caption{font-size:11.5px;color:var(--muted);margin:6px 0 10px;line-height:1.5;}
+  .rpt-case-row{display:grid;grid-template-columns:2fr 3fr;gap:16px;}
+  .rpt-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0;}
+  .rpt-metric{background:var(--purple-050);border:1px solid var(--line);border-radius:10px;padding:12px 14px;}
+  .rpt-metric .k{font-size:11.5px;color:var(--muted);font-weight:600;}
+  .rpt-metric .v{font-size:15px;font-weight:700;color:var(--purple-900);margin-top:4px;word-break:break-word;}
+  .rpt-title{font-size:13.5px;font-weight:700;color:var(--purple-900);margin:18px 0 8px;}
+  .rpt-sub{font-size:13px;font-weight:700;color:var(--purple-800);margin:18px 0 10px;}
+  .rpt-hr{border:none;border-top:1px solid var(--line);margin:16px 0;}
+  .rpt-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:10px;}
+  .rpt-btn{text-align:left;padding:9px 12px;font-size:12.5px;cursor:pointer;}
+  .rpt-btn:disabled{opacity:.55;cursor:not-allowed;}
+  .rpt-uc-label{color:var(--muted)!important;font-weight:600;}
+  .rpt-uc-btn{color:var(--muted);opacity:.55;cursor:not-allowed;}
+  .rpt-icon{vertical-align:-3px;margin-right:5px;flex:none;}
+  .rpt-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:10px 0;}
+  .rpt-module{border:1px solid var(--line);border-radius:9px;margin-bottom:8px;background:#fff;}
+  .rpt-module > summary{padding:10px 14px;font-size:13px;font-weight:600;color:var(--purple-900);cursor:pointer;}
+  .rpt-module-body{padding:0 14px 14px;}
+  .rpt-scroll{overflow:auto;max-height:60vh;border:1px solid var(--line);border-radius:8px;}
+  .rpt-scroll table{min-width:600px;}
+  .rpt-scroll th{position:sticky;top:0;background:#fff;}
+  .rpt-kv{display:grid;grid-template-columns:minmax(120px,220px) 1fr;gap:4px 12px;font-size:12.5px;margin:6px 0;}
+  .rpt-kv .k{color:var(--muted);font-weight:600;word-break:break-word;}
+  .rpt-nest{border-left:2px solid var(--line);padding-left:10px;margin:4px 0;}
+  .rpt-img{max-width:100%;max-height:260px;border:1px solid var(--line);border-radius:6px;margin:4px 6px 4px 0;}
+  .rpt-filter{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0;}
+  .rpt-filter input{padding:7px 9px;border:1px solid var(--line);border-radius:7px;font-size:12.5px;background:#fbfaff;}
+  .rpt-pre{white-space:pre-wrap;font-size:11.5px;background:#fbfaff;border:1px solid var(--line);border-radius:8px;padding:12px;max-height:340px;overflow:auto;}
+  .rpt-modal-back{position:fixed;inset:0;background:rgba(36,26,56,.5);display:none;align-items:center;justify-content:center;z-index:300;}
+  .rpt-modal-back.show{display:flex;}
+  .rpt-modal{background:#fff;border-radius:12px;width:min(1100px,94vw);max-height:88vh;overflow:auto;padding:18px;}
+  .rpt-modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:10px;}
+  .rpt-modal-head h2{margin:0;font-size:15px;}
 </style>
 </head>
 <body>
 
 <div class="topbar">
   <div class="brand">
-    <div class="emblem">CC</div>
+    <div class="emblem">CI</div>
     <div class="brand-text">
-      <div class="name">CCTNS <span style="font-weight:400;font-size:12px;color:var(--muted)">2.0</span></div>
+      <div class="name">CIPHER <span style="font-weight:400;font-size:12px;color:var(--muted)">2.0</span></div>
       <div class="tag" data-i18n="tagline"></div>
     </div>
   </div>
@@ -181,6 +2655,7 @@
       <button id="btnEn" onclick="setLang('en')">English</button>
     </div>
     <span class="login-time" id="loginTime"></span>
+    <select class="pill-select" id="citySelect"></select>
     <select class="pill-select" id="stationSelect"></select>
     <select class="pill-select" id="roleSelect"></select>
     <div class="top-icon" data-i18n-title="notifications">
@@ -268,6 +2743,16 @@
         <div class="stat c4"><h3 data-i18n="statPreventive"></h3><div class="num">6</div><a class="link" data-page="report" data-i18n="viewDetails"></a></div>
       </div>
 
+      <!-- Real pipeline-backed numbers (Missing/UIDB/UIFP/Preventive above are
+           static placeholders — the synthetic FIR pipeline has no data for
+           those categories). Populated live by dashboard-integration.js. -->
+      <div class="grid4">
+        <div class="stat c1"><h3>Total FIRs</h3><div class="num" id="statTotalFir">0</div></div>
+        <div class="stat c2"><h3>Network Entities</h3><div class="num" id="statTotalEntities">0</div></div>
+        <div class="stat c3"><h3>Network Links</h3><div class="num" id="statTotalLinks">0</div></div>
+        <div class="stat c4"><h3>Critical Bridges</h3><div class="num" id="statCriticalBridges">0</div></div>
+      </div>
+
       <div class="card" style="margin-bottom:16px;">
         <h2 data-i18n="quickLinkTitle" style="margin-bottom:10px;"></h2>
         <div class="quicklinks" style="padding:0;margin-bottom:0;">
@@ -283,20 +2768,29 @@
 
       <div class="row2">
         <div class="card">
-          <h2 data-i18n="crimeTrendTitle"></h2>
-          <div class="radiorow" id="crimeFilter">
-            <label><input type="radio" name="ct" value="all" checked> <span data-i18n="fAll"></span></label>
-            <label><input type="radio" name="ct" value="heinous"> <span data-i18n="fHeinous"></span></label>
-            <label><input type="radio" name="ct" value="nonheinous"> <span data-i18n="fNonHeinous"></span></label>
+          <h2 data-i18n="caseMapTitle"></h2>
+          <div class="field" style="margin-bottom:10px;">
+            <label data-i18n="caseMapSelectLabel" style="display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;"></label>
+            <select class="pill-select" id="caseMapFirSelect" style="width:100%;background-color:#fbfaff;" onchange="onCaseMapFirChange()"></select>
           </div>
-          <canvas id="crimeTrendChart" height="180"></canvas>
+          <div id="caseLocationMap" style="height:300px;border-radius:8px;overflow:hidden;border:1px solid var(--line);position:relative;"></div>
+          <div id="caseMapCategoryLegend" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;font-size:11px;color:var(--muted);"></div>
+          <div id="caseMapLegend" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;font-size:11px;color:var(--muted);"></div>
         </div>
         <div class="card">
           <h2 data-i18n="crimeWCTitle"></h2>
           <div class="donuts">
-            <div class="donut-block"><canvas id="donutWomen"></canvas><div class="lbl" data-i18n="donutWomenLbl"></div></div>
-            <div class="donut-block"><canvas id="donutChildren"></canvas><div class="lbl" data-i18n="donutChildrenLbl"></div></div>
+            <div class="donut-block"><div class="chart-box" style="height:130px;"><canvas id="donutWomen"></canvas></div><div class="lbl" data-i18n="donutWomenLbl"></div></div>
+            <div class="donut-block"><div class="chart-box" style="height:130px;"><canvas id="donutChildren"></canvas></div><div class="lbl" data-i18n="donutChildrenLbl"></div></div>
+            <div class="donut-block"><div class="chart-box" style="height:130px;"><canvas id="donutElders"></canvas></div><div class="lbl" data-i18n="donutEldersLbl"></div></div>
           </div>
+        </div>
+      </div>
+
+      <div class="row2">
+        <div class="card" style="grid-column:1 / -1;">
+          <h2 data-i18n="caseCategoryTitle"></h2>
+          <div class="chart-box" style="height:220px;"><canvas id="caseCategoryChart"></canvas></div>
         </div>
       </div>
 
@@ -506,6 +3000,11 @@
     <!-- FIR WIZARD -->
     <div class="page" id="page-reg-fir">
       <div class="page-head"><h1 data-i18n="firTitle"></h1><span class="crumb" data-i18n="crumbFir"></span></div>
+      <div class="tabs" id="firTabs">
+        <div class="tab active" data-fir-tab="manual">📝 Manual Registration</div>
+        <div class="tab" data-fir-tab="upload">📄 Upload FIR (PDF)</div>
+      </div>
+      <div id="firTabManual">
       <div class="card">
         <div class="stepper" id="firStepper"></div>
 
@@ -577,6 +3076,77 @@
           </div>
         </div>
       </div>
+      </div><!-- /#firTabManual  (this closing tag was MISSING: without it every page after
+                 Registration -- Investigation, Establishment, Report, Case Basket -- was nested
+                 inside the FIR page and hidden whenever FIR wasn't the active page) -->
+
+      <!-- Upload FIR (PDF): extraction is handled by POST /api/fir/extract
+           (same regex + OCR + Groq pipeline as sihdashboard.py); the
+           review form below posts to the existing /api/fir/register. -->
+      <div id="firTabUpload" style="display:none;">
+        <div class="card">
+          <div class="rpt-info" id="firPdfStatus">Checking PDF extraction support...</div>
+          <div class="field" style="max-width:420px;"><label>Upload FIR document (PDF)</label><input type="file" id="firPdfInput" accept="application/pdf,.pdf"></div>
+          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+            <button class="btn solid" id="firPdfExtractBtn" disabled>🧠 Extract fields</button>
+            <span id="firPdfMsg" class="rpt-caption" style="margin:0;"></span>
+          </div>
+
+          <div id="firPdfReview" style="display:none;">
+            <hr class="rpt-hr">
+            <h2>Extracted fields — verify before submitting</h2>
+
+            <div class="rpt-sub">1. Primary Details</div>
+            <div class="form-grid">
+              <div class="field"><label>District *</label><select id="fp-district"></select></div>
+              <div class="field"><label>Police Station *</label><input id="fp-ps"></div>
+              <div class="field"><label>State *</label><input id="fp-state" value="Maharashtra"></div>
+              <div class="field"><label>FIR Number</label><input id="fp-fir-no" placeholder="Leave blank to auto-generate"></div>
+              <div class="field"><label>Date &amp; Time of FIR</label><input id="fp-dt"></div>
+            </div>
+
+            <div class="rpt-sub">2. Details of the Incident</div>
+            <div class="form-grid">
+              <div class="field"><label>Case Type *</label><select id="fp-case-type"></select></div>
+              <div class="field"><label>Acts / Sections</label><input id="fp-acts"></div>
+              <div class="field"><label>Place of Occurrence</label><input id="fp-place" placeholder="e.g. Kharghar"></div>
+            </div>
+
+            <div class="rpt-sub">3. Complainant / Informant</div>
+            <div class="form-grid">
+              <div class="field"><label>Informant Name *</label><input id="fp-inf-name"></div>
+              <div class="field"><label>Informant Contact</label><input id="fp-inf-contact"></div>
+              <div class="field"><label>Informant Address</label><input id="fp-inf-addr"></div>
+            </div>
+
+            <div class="rpt-sub">4. Victim</div>
+            <div class="form-grid">
+              <div class="field"><label>Victim Name *</label><input id="fp-vic-name"></div>
+              <div class="field"><label>Victim Age</label><input id="fp-vic-age" type="number" min="0" max="120" value="25"></div>
+              <div class="field"><label>Victim Gender</label><select id="fp-vic-gender"><option>Male</option><option>Female</option></select></div>
+              <div class="field"><label>Victim Contact</label><input id="fp-vic-contact"></div>
+            </div>
+
+            <div class="rpt-sub">5. Accused</div>
+            <div class="radiorow" style="font-size:13px;">
+              <span>Is the accused known?</span>
+              <label><input type="radio" name="fpAccKnown" value="known"> Known</label>
+              <label><input type="radio" name="fpAccKnown" value="unknown" checked> Unknown</label>
+            </div>
+            <div class="form-grid">
+              <div class="field"><label>Accused Name / Alias</label><input id="fp-acc-name"></div>
+              <div class="field"><label>Accused Contact</label><input id="fp-acc-contact"></div>
+              <div class="field"><label>Accused Address</label><input id="fp-acc-addr"></div>
+            </div>
+
+            <div class="rpt-sub">6. Investigating Officer &amp; Narrative</div>
+            <div class="field" style="max-width:360px;"><label>Investigating Officer Name</label><input id="fp-io" value="Inspector (Unassigned)"></div>
+            <div class="field"><label>Narrative / Statement</label><textarea id="fp-narrative" rows="7" placeholder="Chronological description of the incident."></textarea></div>
+
+            <div class="form-actions"><span></span><button class="btn solid" id="firPdfSubmit">Register FIR</button></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- SUB-MODULE FORMS -->
@@ -638,11 +3208,240 @@
     </div>
 
     <!-- STUB PAGES -->
-    <div class="page" id="page-investigation"><div class="page-head"><h1 data-i18n="navInvestigation"></h1></div><div class="card"><div class="stub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><h3 data-i18n="stubTitle"></h3><p data-i18n="stubDesc"></p></div></div></div>
-    <div class="page" id="page-establishment"><div class="page-head"><h1 data-i18n="navEstablishment"></h1></div><div class="card"><div class="stub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 21h18M5 21V7l7-4 7 4v14"/></svg><h3 data-i18n="stubTitle"></h3><p data-i18n="stubDesc"></p></div></div></div>
-    <div class="page" id="page-report"><div class="page-head"><h1 data-i18n="navReport"></h1></div><div class="card"><div class="stub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3v18h18"/></svg><h3 data-i18n="stubTitle"></h3><p data-i18n="stubDesc"></p></div></div></div>
-    <div class="page" id="page-casebasket"><div class="page-head"><h1 data-i18n="caseBasketTitle"></h1></div><div class="card"><div class="stub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20 7h-4V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2H4a1 1 0 00-1 1v10a2 2 0 002 2h14a2 2 0 002-2V8a1 1 0 00-1-1z"/></svg><h3 data-i18n="caseBasketStub"></h3><p data-i18n="caseBasketDesc"></p></div></div></div>
+    <div class="page" id="page-investigation">
+      <div class="page-head"><h1 data-i18n="navInvestigation"></h1><span class="crumb" data-i18n="crumbInvestigation"></span></div>
 
+      <!-- TAB NAVIGATION (reusing existing .submenu pattern) -->
+      <div class="card">
+        <div class="submenu-nav" style="display:flex;border-bottom:1px solid var(--line);margin:0 -16px 16px -16px;">
+          <button class="submenu-tab active" data-tab="overview" data-i18n="invTabOverview">Overview</button>
+          <button class="submenu-tab" data-tab="network" data-i18n="invTabNetwork">Network Analysis</button>
+          <button class="submenu-tab" data-tab="timeline" data-i18n="invTabTimeline">Timeline</button>
+          <button class="submenu-tab" data-tab="alerts" data-i18n="invTabAlerts">Suspicious Activity</button>
+          <button class="submenu-tab" data-tab="persons" data-i18n="invTabPersons">Persons & Witnesses</button>
+        </div>
+      </div>
+
+      <!-- TAB CONTENTS -->
+
+      <!-- Overview Tab -->
+      <div class="page-tab-content active" id="inv-tab-overview">
+        <div class="grid4">
+          <div class="stat c1"><h3>Case Count</h3><div class="num" id="statInvCaseCount">0</div></div>
+          <div class="stat c2"><h3>District Breakdown</h3><div class="num" id="statInvDistrictCount">0</div></div>
+          <div class="stat c3"><h3>Network Nodes</h3><div class="num" id="statInvNetworkNodes">0</div></div>
+          <div class="stat c4"><h3>Network Edges</h3><div class="num" id="statInvNetworkEdges">0</div></div>
+        </div>
+        <div class="row2">
+          <div class="card"><h2>Network Overview</h2><div class="chart-box"><canvas id="networkOverviewChart"></canvas></div></div>
+          <div class="card"><h2>District Distribution</h2><div class="chart-box"><canvas id="districtChart"></canvas></div></div>
+        </div>
+      </div>
+
+      <!-- Network Analysis Tab -->
+      <div class="page-tab-content" id="inv-tab-network">
+        <div class="row2">
+          <div class="card">
+            <h2>Top Suspects</h2>
+            <table>
+              <thead><tr><th>Rank</th><th>Name</th><th>Risk Score</th><th>Case Count</th></tr></thead>
+              <tbody id="topSuspectsTable"></tbody>
+            </table>
+          </div>
+          <div class="card">
+            <h2>Critical Bridges</h2>
+            <div id="bridgesList"></div>
+          </div>
+        </div>
+        <div class="card">
+          <h2 data-i18n="patternIntelTitle" style="margin-bottom:10px;"></h2>
+          <div id="patternIntelList"></div>
+        </div>
+        <div class="card">
+          <h2>Network Map</h2>
+          <iframe id="networkMapFrame" data-src="/api/network/map" loading="lazy" style="width:100%;height:400px;border:none;"></iframe>
+        </div>
+      </div>
+
+      <!-- Timeline Tab -->
+      <div class="page-tab-content" id="inv-tab-timeline">
+        <!-- Interactive Multi-Event Chronology Chart: ported from
+             sihtimeline.py's render_timeline_page() (st.subheader
+             "Interactive Multi-Event Chronology Chart" + a Plotly
+             px.scatter with x=DateTime, y=Person, color=Event Type,
+             size=Risk Score). Rebuilt here as a Chart.js bubble chart
+             fed by the same /api/timeline?case_id=... payload the Event
+             Timeline cards below already use, so it stays in sync with
+             whatever FIR is selected in the dropdown. -->
+        <div class="card">
+          <h2>Interactive Multi-Event Chronology Chart</h2>
+          <div class="field" style="margin-bottom:12px;max-width:320px;">
+            <label data-i18n="timelineFirSelectLbl" style="display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;"></label>
+            <select class="pill-select" id="timelineFirSelect" style="width:100%;background-color:#fbfaff;" onchange="loadInvestigationTimelineTab()"></select>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
+            <div id="chronologyChartLegend" style="display:flex;flex-wrap:wrap;gap:10px;font-size:11px;color:var(--muted);"></div>
+            <!-- Zoom controls for chronologyChartInstance (chartjs-plugin-zoom).
+                 Scroll wheel / pinch also zoom directly on the chart; these
+                 buttons cover mouse-only / accessibility use, plus a reset. -->
+            <div style="display:flex;gap:6px;">
+              <button type="button" class="btn ghost" title="Zoom in" onclick="zoomChronologyChart(1.25)" style="padding:4px 10px;font-size:13px;">+</button>
+              <button type="button" class="btn ghost" title="Zoom out" onclick="zoomChronologyChart(0.8)" style="padding:4px 10px;font-size:13px;">−</button>
+              <button type="button" class="btn ghost" title="Reset zoom" onclick="resetChronologyChartZoom()" style="padding:4px 10px;font-size:11px;">Reset</button>
+            </div>
+          </div>
+          <div class="chart-box" style="height:420px;"><canvas id="chronologyChart"></canvas></div>
+          <div id="chronologyChartEmpty" style="display:none;text-align:center;color:var(--muted);font-size:12.5px;padding:20px 0;">No correlated timeline events available for this selection.</div>
+          <div style="font-size:10.5px;color:var(--muted);margin-top:6px;">Scroll to zoom, drag to pan, or use the +/− controls above.</div>
+        </div>
+
+        <div class="card">
+          <h2>Event Timeline</h2>
+          <div id="timelineContainer"></div>
+        </div>
+      </div>
+
+      <!-- Suspicious Activity Tab -->
+      <div class="page-tab-content" id="inv-tab-alerts">
+        <div class="row2">
+          <div class="card">
+            <h2>Structural Alerts</h2>
+            <div id="structuralAlertsList"></div>
+          </div>
+          <div class="card">
+            <h2>Statistical Alerts</h2>
+            <div id="statisticalAlertsList"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Persons & Witnesses Tab -->
+      <div class="page-tab-content" id="inv-tab-persons">
+        <!-- Persons by Role: ported from sihdashboard.py's "Persons and
+             Witnesses" -> "Persons" tab (every Informant/Victim/Accused
+             across all FIRs, with their graph connection count). -->
+        <div class="card">
+          <h2>Persons &amp; Witnesses</h2>
+          <div class="field" style="margin-bottom:12px;max-width:220px;">
+            <label style="display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;">Filter by role</label>
+            <select class="pill-select" id="personsRoleFilter" style="width:100%;background-color:#fbfaff;" onchange="renderPersonsByRoleTable()">
+              <option value="">All roles</option>
+              <option value="Informant">Informant</option>
+              <option value="Victim">Victim / Witness</option>
+              <option value="Accused">Accused</option>
+            </select>
+          </div>
+          <table>
+            <thead><tr><th>Name</th><th>Role</th><th>Case ID</th><th>District</th><th>Connections</th></tr></thead>
+            <tbody id="personsByRoleTable"></tbody>
+          </table>
+        </div>
+
+        <div class="row2">
+          <div class="card">
+            <!-- Entities by Type: ported from sihdashboard.py's
+                 "Entities by Type" tab (node-type breakdown of the same
+                 relationship graph -- PERSON, PHONE, VEHICLE, ...). -->
+            <h2>Entities by Type</h2>
+            <div id="entityTypesList"></div>
+          </div>
+          <div class="card">
+            <!-- Confirmed same-person merges + possible duplicates, from
+                 sihentityresolution.py's Fellegi-Sunter linkage via
+                 sihrelationship.py's build_relationship_graph(). -->
+            <h2>Confirmed Same-Person Merges</h2>
+            <table>
+              <thead><tr><th>Canonical Name</th><th>Merged Aliases</th><th>Confidence</th></tr></thead>
+              <tbody id="personsTable"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>🧬 Possible Same Person — Needs Investigator Review</h2>
+          <div id="duplicatesList"></div>
+        </div>
+      </div>
+    </div>
+    <div class="page" id="page-establishment"><div class="page-head"><h1 data-i18n="navEstablishment"></h1></div><div class="card"><div class="stub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 21h18M5 21V7l7-4 7 4v14"/></svg><h3 data-i18n="stubTitle"></h3><p data-i18n="stubDesc"></p></div></div></div>
+    <div class="page" id="page-report"><div class="page-head"><h1 data-i18n="navReport"></h1></div><div id="reportRoot"><div class="card"><p class="rpt-caption">Loading reports...</p></div></div></div>
+    <!-- CASE BASKET -->
+    <div class="page" id="page-casebasket">
+      <div class="page-head"><h1 data-i18n="caseBasketTitle"></h1><span class="crumb" data-i18n="crumbCaseBasket"></span></div>
+
+      <!-- FIR selector: every sub-tab below is scoped to whichever FIR is
+           chosen here (populated from /api/case-locations, same source the
+           Timeline tab's FIR dropdown uses -- see onCaseBasketFirChange()
+           in dashboard-integration.js). -->
+      <div class="card" style="margin-bottom:16px;">
+        <div class="cb-firbar">
+          <div class="field">
+            <label data-i18n="cbSelectFirLabel"></label>
+            <select class="pill-select" id="caseBasketFirSelect" style="width:100%;background-color:#fbfaff;" onchange="onCaseBasketFirChange()"></select>
+          </div>
+          <div class="cb-firmeta" id="caseBasketFirMeta"></div>
+        </div>
+      </div>
+
+      <!-- Shown until an FIR is picked -->
+      <div class="card" id="caseBasketEmptyState">
+        <div class="cb-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20 7h-4V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2H4a1 1 0 00-1 1v10a2 2 0 002 2h14a2 2 0 002-2V8a1 1 0 00-1-1zM10 5h4v2h-4z"/></svg>
+          <h3 data-i18n="cbEmptyTitle"></h3>
+          <p data-i18n="cbEmptyDesc"></p>
+        </div>
+      </div>
+
+      <!-- Sub-tabs + tab content: hidden until an FIR is picked -->
+      <div id="caseBasketBody" style="display:none;">
+        <div class="card" style="margin-bottom:16px;padding-bottom:0;">
+          <div class="submenu-nav" style="display:flex;border-bottom:1px solid var(--line);margin:0 -16px 0 -16px;">
+            <button class="submenu-tab active" data-cbtab="checklist" data-i18n="cbTabChecklist"></button>
+            <button class="submenu-tab" data-cbtab="assistant" data-i18n="cbTabAssistant"></button>
+            <button class="submenu-tab" data-cbtab="insights" data-i18n="cbTabInsights"></button>
+          </div>
+        </div>
+
+        <!-- Checklist tab (the main feature) -->
+        <div class="page-tab-content active" id="cb-tab-checklist">
+          <div class="card">
+            <h2 style="margin-bottom:10px;" data-i18n="cbChecklistTitle"></h2>
+            <div class="cb-progress-row">
+              <div class="cb-progress-track"><div class="cb-progress-fill" id="cbProgressFill" style="width:0%;"></div></div>
+              <div class="cb-progress-label" id="cbProgressLabel">0/0</div>
+            </div>
+            <div id="cbChecklistList" class="checklist"></div>
+          </div>
+        </div>
+
+        <!-- AI Assistant tab (SOP legal AI assistant -- existing chat UI) -->
+        <div class="page-tab-content" id="cb-tab-assistant">
+          <div class="card" style="height:60vh;display:flex;flex-direction:column;">
+            <div class="chat-messages" id="chatMessages" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;"></div>
+            <div style="display:flex;gap:8px;padding:12px;border-top:1px solid var(--line);">
+              <input type="text" id="chatInput" data-i18n-ph="cbAssistantPlaceholder" style="flex:1;padding:8px;border:1px solid var(--line);border-radius:6px;">
+              <button class="btn solid" onclick="sendChatMessage()" data-i18n="cbAssistantSend" style="white-space:nowrap;"></button>
+            </div>
+          </div>
+        </div>
+
+        <!-- AI Investigation Insights tab -->
+        <div class="page-tab-content" id="cb-tab-insights">
+          <div class="card"><div class="stub">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2a7 7 0 00-4 12.74V17a1 1 0 001 1h6a1 1 0 001-1v-2.26A7 7 0 0012 2z"/><path d="M9 21h6"/></svg>
+            <h3 data-i18n="cbInsightsStubTitle"></h3><p data-i18n="cbInsightsStubDesc"></p>
+          </div></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="rpt-modal-back" id="rptModalBack">
+  <div class="rpt-modal">
+    <div class="rpt-modal-head"><h2 id="rptModalTitle"></h2><button class="btn" id="rptModalClose">✕ Close</button></div>
+    <div id="rptModalBody"></div>
   </div>
 </div>
 
@@ -651,7 +3450,7 @@
 <script>
 // TRANSLATIONS
 const DICT = {
-  tagline:{hi:'अपराध एवं अपराधी ट्रैकिंग नेटवर्क एवं प्रणाली', en:'Crime & Criminal Tracking Network & Systems'},
+  tagline:{hi:'आपराधिक आसूचना एवं पैटर्न-आधारित सोपानिक निकाय तर्कण', en:'Criminal Intelligence & Pattern-based Hierarchical Entity Reasoning'},
   notifications:{hi:'सूचनाएं', en:'Notifications'},
   search:{hi:'खोजें', en:'Search'},
   searchPh:{hi:'खोजें...', en:'Search...'},
@@ -689,13 +3488,26 @@ const DICT = {
   qArrest:{hi:'गिरफ्तारी', en:'Arrest'},
   qSeizure:{hi:'जब्ती', en:'Seizure'},
   qUID:{hi:'अज्ञात शव', en:'Unidentified Body'},
-  crimeTrendTitle:{hi:'Crime Trend', en:'Crime Trend'},
+  caseMapTitle:{hi:'केस स्थान — मुंबई एवं नवी मुंबई', en:'Case Locations — Mumbai & Navi Mumbai'},
+  caseMapSelectLabel:{hi:'क्रॉस-जुरिसडिक्शन लिंक हाइलाइट करने हेतु केस चुनें:', en:'Select a case to highlight its cross-jurisdictional links:'},
+  caseMapNone:{hi:'— कोई नहीं —', en:'— none —'},
+  caseMapNoLinks:{hi:'इस केस हेतु कोई क्रॉस-जुरिसडिक्शन लिंक नहीं मिला', en:'No cross-jurisdictional links found for this case'},
+  caseMapCategoryLbl:{hi:'श्रेणी', en:'Category'},
+  timelineFirSelectLbl:{hi:'समयरेखा देखने हेतु FIR चुनें:', en:'Select a FIR to view its timeline:'},
   fAll:{hi:'All', en:'All'},
   fHeinous:{hi:'Heinous', en:'Heinous'},
   fNonHeinous:{hi:'Non-Heinous', en:'Non-Heinous'},
-  crimeWCTitle:{hi:'महिला व बाल अपराध', en:'Crime Against Women & Children'},
+  crimeWCTitle:{hi:'केस वितरण', en:'Case Distribution'},
   donutWomenLbl:{hi:'महिलाओं के विरुद्ध अपराध', en:'Crime Against Women'},
   donutChildrenLbl:{hi:'बच्चों के विरुद्ध अपराध', en:'Crime Against Children'},
+  donutEldersLbl:{hi:'वृद्धजनों के विरुद्ध अपराध', en:'Crime Against Elders'},
+  caseCategoryTitle:{hi:'केस श्रेणी विवरण', en:'Case Category Breakdown'},
+  invTabOverview:{hi:'अवलोकन', en:'Overview'},
+  invTabNetwork:{hi:'नेटवर्क विश्लेषण', en:'Network Analysis'},
+  invTabTimeline:{hi:'समयरेखा', en:'Timeline'},
+  invTabAlerts:{hi:'संदिग्ध गतिविधि', en:'Suspicious Activity'},
+  invTabPersons:{hi:'व्यक्ति एवं गवाह', en:'Persons & Witnesses'},
+  patternIntelTitle:{hi:'पैटर्न इंटेलिजेंस इंजन — सांख्यिकीय विसंगति अलर्ट', en:'Pattern Intelligence Engine — Statistical Anomaly Alerts'},
   viewAll:{hi:'सभी देखें', en:'View All'},
   pendingTasksTitle:{hi:'लंबित कार्य', en:'Pending Tasks'},
   thTaskName:{hi:'कार्य का नाम', en:'Task Name'},
@@ -705,6 +3517,7 @@ const DICT = {
   dailyStatusTitle:{hi:'दैनिक स्थिति रिपोर्ट', en:'Daily Status Report'},
 
   crumbGDView:{hi:'होम / जनरल डायरी / खोजें और देखें', en:'Home / General Diary / Search & View'},
+  crumbInvestigation:{hi:'होम / अनुसंधान', en:'Home / Investigation'},
   gdTypeLabel:{hi:'जनरल डायरी प्रकार', en:'General Diary Type'},
   gdTypeLabelReq:{hi:'जनरल डायरी प्रकार *', en:'General Diary Type *'},
   dateLabel:{hi:'दिनांक', en:'Date'},
@@ -921,8 +3734,60 @@ const DICT = {
   stubTitle:{hi:'यह मॉड्यूल विकासाधीन है', en:'This module is under development'},
   stubDesc:{hi:'Work in progress', en:'Work in progress'},
   caseBasketTitle:{hi:'केस बास्केट (AI Case Basket)', en:'Case Basket (AI Case Basket)'},
-  caseBasketStub:{hi:'AI Case Basket — विकासाधीन', en:'AI Case Basket — Work in progress'},
-  caseBasketDesc:{hi:'यहां केवल बटन आवश्यक है; कार्यक्षमता निर्माणाधीन है।', en:'Only a button is needed here for now; functionality is under construction.'},
+  crumbCaseBasket:{hi:'होम / केस बास्केट', en:'Home / Case Basket'},
+
+  cbSelectFirLabel:{hi:'एफआईआर नंबर चुनें', en:'Select FIR No.'},
+  cbSelectFirPlaceholder:{hi:'-- केस बास्केट देखने हेतु FIR चुनें --', en:'-- Select an FIR to view its case basket --'},
+  cbEmptyTitle:{hi:'कोई FIR चयनित नहीं है', en:'No FIR selected'},
+  cbEmptyDesc:{hi:'ऊपर से एक FIR चुनें ताकि उसका केस बास्केट, चेकलिस्ट और AI असिस्टेंट यहां दिखाई दें।', en:'Select an FIR above to view its case basket — full case details, checklist, and AI assistant.'},
+
+  cbTabChecklist:{hi:'चेकलिस्ट', en:'Checklist'},
+  cbTabAssistant:{hi:'AI असिस्टेंट', en:'AI Assistant'},
+  cbTabInsights:{hi:'AI अनुसंधान अंतर्दृष्टि', en:'AI Investigation Insights'},
+
+  cbChecklistTitle:{hi:'अनुसंधान चेकलिस्ट — अब तक क्या हुआ, क्या शेष है', en:'Investigation Checklist — what\u2019s done, what\u2019s pending'},
+
+  cbAssistantPlaceholder:{hi:'कोई कानूनी सवाल पूछें (SOP आधारित)...', en:'Ask a legal / SOP question...'},
+  cbAssistantSend:{hi:'भेजें', en:'Send'},
+
+  cbInsightsStubTitle:{hi:'AI अनुसंधान अंतर्दृष्टि — जल्द आ रहा है', en:'AI Investigation Insights — Coming soon'},
+  cbInsightsStubDesc:{hi:'नए विवेचकों के लिए केस-डायरी सुझाव और अगले कदमों की AI भविष्यवाणी यहां जल्द जोड़ी जाएगी।', en:'AI-predicted next steps and Case Diary drafting suggestions for investigators will appear here soon.'},
+
+  cbFirMetaLine:{hi:'जिला: {district} • मामले का प्रकार: {type}', en:'District: {district} • Case Type: {type}'},
+
+  cbItemFirTitle:{hi:'प्रथम सूचना रिपोर्ट (FIR)', en:'First Information Report (FIR)'},
+  cbItemAccusedTitle:{hi:'अभियुक्त का विवरण', en:'Accused Details'},
+  cbItemArrestTitle:{hi:'गिरफ्तारी ज्ञापन / उद्घोषित अपराधी', en:'Arrest Memo / Proclaimed Offender'},
+  cbItemPropertyTitle:{hi:'संपत्ति एवं बरामदगी विवरण', en:'Property & Seizure Details'},
+  cbItemCdTitle:{hi:'केस डायरी (CD)', en:'Case Diary (CD)'},
+  cbItemGdTitle:{hi:'सम्बद्ध जनरल डायरी (GD)', en:'Linked General Diary (GD)'},
+  cbItemIf2Title:{hi:'आईएफ-2 प्रपत्र', en:'IF-II Form'},
+  cbItemSectionTitle:{hi:'धारा का संशोधन', en:'Section Amendment'},
+  cbItemEsignTitle:{hi:'न्यायालय ई-हस्ताक्षर एवं प्रस्तुतीकरण', en:'Court e-Signature & Submission'},
+
+  cbStatusDone:{hi:'पूर्ण', en:'Done'},
+  cbStatusPending:{hi:'शेष', en:'Pending'},
+
+  cbFirSubDone:{hi:'FIR पंजीकृत — सभी प्रारंभिक विवरण दर्ज।', en:'FIR registered — all initial particulars on record.'},
+  cbAccusedSubDone:{hi:'{n} अभियुक्त प्रोफाइल किए गए।', en:'{n} accused profiled.'},
+  cbAccusedSubPending:{hi:'अभी तक कोई अभियुक्त विवरण दर्ज नहीं।', en:'No accused details recorded yet.'},
+  cbArrestSubDone:{hi:'{action} — {date} को दर्ज।', en:'{action} — filed on {date}.'},
+  cbArrestSubPending:{hi:'अभी तक कोई कार्रवाई दर्ज नहीं।', en:'No action recorded yet.'},
+  cbArrestActionMemo:{hi:'गिरफ्तारी ज्ञापन तैयार', en:'Arrest memo prepared'},
+  cbArrestActionPO:{hi:'उद्घोषित अपराधी घोषित', en:'Declared proclaimed offender'},
+  cbPropertySubDone:{hi:'{n} वस्तुएं बरामद, अनुमानित मूल्य ₹{value}।', en:'{n} items seized, estimated value ₹{value}.'},
+  cbPropertySubPending:{hi:'अभी तक कोई संपत्ति जब्त/दर्ज नहीं।', en:'No property seized or recorded yet.'},
+  cbCdSubDone:{hi:'{n} केस डायरी प्रविष्टियां दर्ज — देखने हेतु क्लिक करें।', en:'{n} Case Diary entries recorded — click to view.'},
+  cbCdSubPending:{hi:'अभी तक कोई केस डायरी नहीं काटी गई।', en:'No Case Diary entries filed yet.'},
+  cbGdSubDone:{hi:'{n} जनरल डायरी इस केस से जुड़ी हैं।', en:'{n} General Diary entries linked to this case.'},
+  cbGdSubPending:{hi:'कोई जनरल डायरी सम्बद्ध नहीं मिली।', en:'No General Diary entries linked.'},
+  cbIf2SubDone:{hi:'आईएफ-2 {date} को काटा गया।', en:'IF-II filed on {date}.'},
+  cbIf2SubPending:{hi:'आईएफ-2 अभी तक नहीं काटा गया।', en:'IF-II has not been filed yet.'},
+  cbSectionSubDone:{hi:'धारा संशोधित — {detail}।', en:'Section amended — {detail}.'},
+  cbSectionSubPending:{hi:'अभी तक कोई धारा संशोधन नहीं।', en:'No section amendment yet.'},
+  cbEsignSubDone:{hi:'सभी लंबित न्यायालय कार्रवाई पर ई-हस्ताक्षर हो चुके हैं।', en:'All pending court actions have been e-signed.'},
+  cbEsignSubPending:{hi:'{n} कार्रवाई ई-हस्ताक्षर हेतु लंबित हैं।', en:'{n} action(s) still pending e-signature.'},
+  cbViewLink:{hi:'देखें ›', en:'View ›'},
 
   toastGD:{hi:'जनरल डायरी सफलतापूर्वक दर्ज की गई', en:'General Diary entry saved successfully'},
   toastComplaint:{hi:'शिकायत सफलतापूर्वक दर्ज की गई', en:'Complaint filed successfully'},
@@ -971,18 +3836,38 @@ function setLang(lang){
   document.getElementById('btnEn').classList.toggle('active', lang==='en');
   applyStaticI18n();
   populateSelects();
-  refreshCharts();
+  // Toggling language used to call initCaseLocationMap(), which re-downloaded
+  // /api/case-locations and rebuilt every marker. Only the translated labels
+  // need refreshing, so do just that.
+  if (caseLocationMapInstance) {
+    renderCaseMapCategoryLegend(caseMapColors);
+    const firstOpt = document.querySelector('#caseMapFirSelect option[value=""]');
+    if (firstOpt) firstOpt.textContent = t('caseMapNone');
+  }
   renderPendingTasks();
   renderCalendar();
   renderGDList();
   renderComplaints();
   renderRollcall();
   renderStepper();
+
+  // Case Basket: refresh the FIR-select placeholder + checklist labels in
+  // the new language, without re-fetching or losing the chosen FIR.
+  const cbFirstOpt = document.querySelector('#caseBasketFirSelect option[value=""]');
+  if (cbFirstOpt) cbFirstOpt.textContent = t('cbSelectFirPlaceholder');
+  if (typeof caseBasketCurrentFir !== 'undefined' && caseBasketCurrentFir) {
+    renderCaseBasketForFir(caseBasketCurrentFir);
+  }
 }
 
 function opt(sel, key, value){ const o=document.createElement('option'); o.value=value||key; o.textContent=t(key); return o; }
 
 function populateSelects(){
+  const city = document.getElementById('citySelect');
+  const cityPrevVal = city.value;
+  city.innerHTML = `<option value="Navi Mumbai">${currentLang==='hi'?'नवी मुंबई':'Navi Mumbai'}</option><option value="Mumbai">${currentLang==='hi'?'मुंबई':'Mumbai'}</option>`;
+  city.value = cityPrevVal && [...city.options].some(o=>o.value===cityPrevVal) ? cityPrevVal : 'Navi Mumbai';
+
   const station = document.getElementById('stationSelect');
   station.innerHTML = `<option>${currentLang==='hi'?'केंद्रीय थाना':'Central Police Station'}</option><option>${currentLang==='hi'?'सिटी कोतवाली':'City Kotwali'}</option>`;
   const role = document.getElementById('roleSelect');
@@ -1059,6 +3944,15 @@ function showPage(id){
     if(el.classList.contains('nav-item')||el.tagName==='A') el.classList.add('active');
   });
   window.scrollTo({top:0,behavior:'smooth'});
+  // dashboard-integration.js used to wire up its own copy of this nav
+  // logic on DOMContentLoaded (see initializePageNavigation there), which
+  // double-fired every click alongside this handler -- two calls to
+  // classList.toggle('open') on the same element cancel each other out,
+  // which is why the Registration / General Diary submenus looked like
+  // they "didn't open". That duplicate wiring has been removed; this is
+  // now the single place page switches happen, so we call into
+  // dashboard-integration.js's data loader directly instead.
+  if (typeof loadPageData === 'function') { try { loadPageData(id); } catch(e) { console.error('loadPageData failed for', id, e); } }
 }
 document.querySelectorAll('[data-page]').forEach(el=>{
   el.addEventListener('click', (e)=>{ e.preventDefault(); showPage(el.getAttribute('data-page')); });
@@ -1073,50 +3967,268 @@ document.querySelectorAll('[data-toggle]').forEach(el=>{
 document.querySelector('[data-toggle="gd"]').classList.add('open');
 document.getElementById('sub-gd').classList.add('open');
 
-// CHARTS
-let trendChart, donutWomenChart, donutChildrenChart;
-function crimeData(){
-  return {
-    all: {labels: currentLang==='hi' ? ['शस्त्र','हत्या का प्रयास','चोरी','जालसाजी','आपराधिक षड्यंत्र','झूठे साक्ष्य','अपहरण','हत्या','दुष्कर्म','चोरी','महिला अपराध']
-                                       : ['Arms','Attempt to Murder','Theft','Forgery','Criminal Conspiracy','False Evidence','Kidnapping','Murder','Rape','Theft','Women'],
-          values:[94,82,63,52,50,35,34,32,25,12,5]},
-    heinous: {labels: currentLang==='hi' ? ['हत्या','दुष्कर्म','अपहरण','डकैती','हत्या का प्रयास'] : ['Murder','Rape','Kidnapping','Dacoity','Attempt to Murder'], values:[32,25,34,18,82]},
-    nonheinous: {labels: currentLang==='hi' ? ['जालसाजी','आपराधिक षड्यंत्र','झूठे साक्ष्य','चोरी','शस्त्र'] : ['Forgery','Criminal Conspiracy','False Evidence','Theft','Arms'], values:[52,50,35,63,94]}
-  };
+// CASE LOCATION MAP + CROSS-JURISDICTIONAL LINKS
+// Ported from sihdashboard.py's Overview Dashboard map panel (Case Locations
+// — Mumbai & Navi Mumbai / Cross-Jurisdictional Links), rebuilt with Leaflet
+// since this page has no Streamlit/Plotly runtime. Data comes from the
+// /api/case-locations and /api/case-links/<fir_no> endpoints (see
+// sihfrontendtest.py's REST API section). initCaseLocationMap() is called
+// once from loadDashboardData() in dashboard-integration.js.
+let caseLocationMapInstance = null;
+let caseMarkersLayer = null;
+let caseLinksLayer = null;
+let allCaseLocations = [];
+let caseMapColors = {};
+
+function showMapError(msg){
+  const mapEl = document.getElementById('caseLocationMap');
+  if (mapEl) {
+    mapEl.innerHTML = `<div style="height:100%;display:flex;align-items:center;justify-content:center;
+      text-align:center;padding:12px;font-size:12.5px;color:var(--muted);">${msg}</div>`;
+  }
 }
-function initCharts(){
-  const ctx = document.getElementById('crimeTrendChart');
-  const d = crimeData().all;
-  trendChart = new Chart(ctx, {
-    type:'bar',
-    data:{ labels:d.labels, datasets:[{ data:d.values, backgroundColor:'#5a3a92', borderRadius:4, maxBarThickness:34 }]},
-    options:{ plugins:{legend:{display:false}}, scales:{ y:{beginAtZero:true, grid:{color:'#eee6fb'}}, x:{grid:{display:false}, ticks:{font:{size:10}}} } }
-  });
-  donutWomenChart = new Chart(document.getElementById('donutWomen'), {
-    type:'doughnut',
-    data:{ datasets:[{ data:[45,18,25,12], backgroundColor:['#c22a72','#e37fab','#f3b6cf','#f8dbe8'], borderWidth:0 }]},
-    options:{ plugins:{legend:{display:false}}, cutout:'68%' }
-  });
-  donutChildrenChart = new Chart(document.getElementById('donutChildren'), {
-    type:'doughnut',
-    data:{ datasets:[{ data:[38,15,29,18], backgroundColor:['#2f8fd1','#6cb3e0','#a8d3ee','#dcedfa'], borderWidth:0 }]},
-    options:{ plugins:{legend:{display:false}}, cutout:'68%' }
-  });
-  document.querySelectorAll('#crimeFilter input').forEach(r=>{
-    r.addEventListener('change', ()=>{
-      const dd = crimeData()[r.value];
-      trendChart.data.labels = dd.labels;
-      trendChart.data.datasets[0].data = dd.values;
-      trendChart.update();
+
+async function initCaseLocationMap(retry){
+  const mapEl = document.getElementById('caseLocationMap');
+  if (!mapEl) return;
+
+  // Leaflet is served locally from /static/leaflet/ (see the <script>/<link>
+  // tags in <head> and ensure_leaflet_assets() at startup) rather than a
+  // CDN, since this environment can't reach any CDN. If it's still
+  // undefined here, the local files are missing from ./static/leaflet/ --
+  // wait briefly and retry once in case the script tag just hasn't
+  // finished loading yet, then report clearly if it's truly missing.
+  if (typeof L === 'undefined') {
+    if (!retry) { setTimeout(() => initCaseLocationMap(true), 1000); return; }
+    console.error('Leaflet did not load from /static/leaflet/leaflet.js -- the files are likely missing from the static folder.');
+    showMapError('Map library files are missing. Run the server once with internet access so it can fetch them (see ensure_leaflet_assets()), or manually place leaflet.js/leaflet.css under static/leaflet/.');
+    return;
+  }
+
+  let data;
+  try {
+    const res = await fetch(window.location.origin + '/api/case-locations');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    data = await res.json();
+  } catch (e) {
+    console.error('case-locations fetch failed', e);
+    showMapError('Could not load case locations from the server. Check the browser console / server logs for the /api/case-locations error.');
+    return;
+  }
+  allCaseLocations = data.cases || [];
+  const center = [data.center?.lat ?? 19.033, data.center?.lon ?? 73.0297];
+
+  if (!caseLocationMapInstance) {
+    caseLocationMapInstance = L.map('caseLocationMap', {
+      // preferCanvas: every circleMarker/polyline is drawn on ONE shared
+      // <canvas> instead of Leaflet's default of one SVG <path> element per
+      // marker. With SVG, each zoom frame has to re-transform every single
+      // path node in the DOM, which is exactly what made markers visibly
+      // lag/stutter behind the tiles while zooming. A single canvas repaints
+      // as one unit and tracks the zoom animation smoothly, which is why
+      // sihdashboard's Plotly map (also canvas-based) never showed this lag.
+      preferCanvas: true,
+    }).setView(center, data.zoom || 11);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors', maxZoom: 18,
+      crossOrigin: true, // lets the "capture map" button below read these tiles onto a canvas
+    }).addTo(caseLocationMapInstance);
+    caseMarkersLayer = L.layerGroup().addTo(caseLocationMapInstance);
+    caseLinksLayer = L.layerGroup().addTo(caseLocationMapInstance);
+    // Leaflet measures its container's size at creation time. If the map's
+    // card was hidden/animating in (display:none, an offcanvas, a tab that
+    // wasn't yet visible) that size can be 0x0, leaving grey/blank tiles
+    // forever until something forces a re-measure. This covers that case.
+    setTimeout(() => caseLocationMapInstance.invalidateSize(), 100);
+    addCaseMapExtraControls(caseLocationMapInstance, mapEl);
+  } else {
+    caseLocationMapInstance.setView(center, data.zoom || 11);
+    caseLocationMapInstance.invalidateSize();
+  }
+
+  caseMarkersLayer.clearLayers();
+  caseLinksLayer.clearLayers();
+  const colors = data.category_colors || {};
+  caseMapColors = colors;
+  renderCaseMapCategoryLegend(colors);
+  allCaseLocations.forEach(c=>{
+    const color = colors[c.category] || '#818cf8';
+    const marker = L.circleMarker([c.lat, c.lon], {
+      radius: 8, color: color, fillColor: color, fillOpacity: 0.85, weight: 1.5,
+    }).bindTooltip(
+      `<b>${c.fir_no}</b><br>${c.case_type||''}<br>${c.police_station||''}, ${c.district||''}<br>IO: ${c.io_name||'—'}`,
+      { sticky: true }
+    );
+    marker.on('click', ()=>{
+      document.getElementById('caseMapFirSelect').value = c.fir_no;
+      loadCaseLinks(c.fir_no);
     });
+    caseMarkersLayer.addLayer(marker);
+  });
+
+  const sel = document.getElementById('caseMapFirSelect');
+  if (sel) {
+    const prevVal = sel.value;
+    sel.innerHTML = `<option value="">${t('caseMapNone')}</option>` +
+      allCaseLocations.map(c=>`<option value="${c.fir_no}">${c.fir_no}</option>`).join('');
+    if (prevVal && allCaseLocations.some(c=>c.fir_no===prevVal)) sel.value = prevVal;
+  }
+}
+
+async function onCaseMapFirChange(){
+  const firNo = document.getElementById('caseMapFirSelect').value;
+  const legend = document.getElementById('caseMapLegend');
+  if (!firNo) {
+    if (caseLinksLayer) caseLinksLayer.clearLayers();
+    if (legend) legend.innerHTML = '';
+    return;
+  }
+  await loadCaseLinks(firNo);
+}
+
+async function loadCaseLinks(firNo){
+  if (!caseLinksLayer) return;
+  let data;
+  try {
+    const res = await fetch(window.location.origin + '/api/case-links/' + encodeURIComponent(firNo));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    data = await res.json();
+  } catch (e) {
+    console.error('case-links fetch failed', e);
+    showToast(currentLang==='hi' ? 'लिंक लोड करने में विफल' : 'Could not load cross-jurisdictional links for this case');
+    return;
+  }
+  caseLinksLayer.clearLayers();
+  const legend = document.getElementById('caseMapLegend');
+  if (!data.case_point) { if (legend) legend.innerHTML = ''; return; }
+
+  const s = data.case_point;
+  caseLinksLayer.addLayer(
+    L.circleMarker([s.lat, s.lon], { radius: 12, color:'#fde047', fillColor:'#fde047', fillOpacity:1, weight:2 })
+      .bindTooltip(`<b>${firNo}</b> — ${currentLang==='hi'?'चयनित':'Selected'}`, { sticky:true })
+  );
+
+  const colors = data.link_colors || {};
+  const legendTypes = new Map();
+  (data.links||[]).forEach(l=>{
+    const color = colors[l.type] || '#94a3b8';
+    legendTypes.set(l.type, color);
+    caseLinksLayer.addLayer(L.polyline([[s.lat,s.lon],[l.lat,l.lon]], { color, weight:2, dashArray:'4,4', opacity:0.85 }));
+    caseLinksLayer.addLayer(
+      L.circleMarker([l.lat,l.lon], { radius:7, color, fillColor:color, fillOpacity:0.9, weight:1 })
+        .bindTooltip(`<b>${l.type}</b><br>${l.label}`, { sticky:true })
+    );
+  });
+
+  if (legend) {
+    legend.innerHTML = legendTypes.size
+      ? Array.from(legendTypes.entries()).map(([name,color])=>
+          `<span style="display:inline-flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;border-radius:50%;background:${color};display:inline-block;"></span>${name}</span>`
+        ).join('')
+      : `<span>${t('caseMapNoLinks')}</span>`;
+  }
+  if (caseLocationMapInstance) caseLocationMapInstance.setView([s.lat, s.lon], 12);
+}
+
+/** Static "Category" legend (Organized/Women-Children/Property/... colored
+ * dots), always visible below the map -- matches sihdashboard.py's native
+ * Plotly legend, which this Leaflet map doesn't get for free. */
+function renderCaseMapCategoryLegend(colors){
+  const el = document.getElementById('caseMapCategoryLegend');
+  if (!el) return;
+  el.innerHTML = `<span style="width:100%;font-weight:600;color:var(--ink);">${t('caseMapCategoryLbl')}</span>` +
+    Object.entries(colors).map(([name,color])=>
+      `<span style="display:inline-flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;border-radius:50%;background:${color};display:inline-block;"></span>${name}</span>`
+    ).join('');
+}
+
+/** Fullscreen + "capture as image" buttons, added once next to Leaflet's
+ * own zoom control -- sihdashboard.py gets these for free from Plotly's
+ * modebar; this Leaflet map needs them built by hand. */
+function addCaseMapExtraControls(map, mapEl){
+  const FullscreenControl = L.Control.extend({
+    options: { position: 'topright' },
+    onAdd: function(){
+      const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control');
+      const link = L.DomUtil.create('a', '', container);
+      link.href = '#';
+      link.title = currentLang==='hi' ? 'पूर्ण स्क्रीन' : 'Toggle fullscreen';
+      link.innerHTML = '⛶';
+      link.style.fontSize = '15px';
+      L.DomEvent.on(link, 'click', L.DomEvent.stop);
+      L.DomEvent.on(link, 'click', () => {
+        const card = mapEl.closest('.card') || mapEl;
+        if (!document.fullscreenElement) {
+          (card.requestFullscreen || card.webkitRequestFullscreen || card.msRequestFullscreen)?.call(card);
+        } else {
+          (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+        }
+      });
+      return container;
+    },
+  });
+  const CameraControl = L.Control.extend({
+    options: { position: 'topright' },
+    onAdd: function(){
+      const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control');
+      const link = L.DomUtil.create('a', '', container);
+      link.href = '#';
+      link.title = currentLang==='hi' ? 'मैप को छवि रूप में सहेजें' : 'Save map as image';
+      link.innerHTML = '📷';
+      link.style.fontSize = '13px';
+      L.DomEvent.on(link, 'click', L.DomEvent.stop);
+      L.DomEvent.on(link, 'click', () => captureCaseMapAsImage(mapEl));
+      return container;
+    },
+  });
+  map.addControl(new FullscreenControl());
+  map.addControl(new CameraControl());
+  document.addEventListener('fullscreenchange', () => {
+    // The map's pixel size changes when its card goes in/out of fullscreen;
+    // Leaflet needs to be told explicitly or it keeps rendering at the old size.
+    setTimeout(() => map.invalidateSize(), 150);
   });
 }
-function refreshCharts(){
-  const active = document.querySelector('#crimeFilter input:checked').value;
-  const dd = crimeData()[active];
-  trendChart.data.labels = dd.labels;
-  trendChart.data.datasets[0].data = dd.values;
-  trendChart.update();
+
+/** Best-effort PNG export of the map (tiles + markers + link lines). Base
+ * tiles come from OpenStreetMap, which -- unlike the preferCanvas overlay
+ * this file draws its own markers/lines on -- may not send CORS headers on
+ * every tile, which taints the output canvas and blocks toDataURL(). This
+ * is wrapped in try/catch so that case shows a clear message instead of a
+ * silently broken download. */
+function captureCaseMapAsImage(mapEl){
+  try {
+    const rect = mapEl.getBoundingClientRect();
+    const out = document.createElement('canvas');
+    out.width = Math.round(rect.width);
+    out.height = Math.round(rect.height);
+    const ctx = out.getContext('2d');
+
+    mapEl.querySelectorAll('.leaflet-tile-pane img').forEach(img => {
+      const r = img.getBoundingClientRect();
+      try {
+        ctx.drawImage(img, r.left - rect.left, r.top - rect.top, r.width, r.height);
+      } catch (e) { /* individual tainted tile -- skip it, keep the rest */ }
+    });
+    const overlayCanvas = mapEl.querySelector('.leaflet-overlay-pane canvas');
+    if (overlayCanvas) {
+      const r = overlayCanvas.getBoundingClientRect();
+      ctx.drawImage(overlayCanvas, r.left - rect.left, r.top - rect.top);
+    }
+
+    const url = out.toDataURL('image/png');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'case-location-map.png';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch (e) {
+    console.error('Map capture failed (cross-origin tiles most likely tainted the canvas)', e);
+    showToast(currentLang==='hi'
+      ? 'मैप छवि सहेजना विफल — कृपया अपने ब्राउज़र/OS के स्क्रीनशॉट टूल का उपयोग करें'
+      : 'Could not save the map as an image — please use your browser/OS screenshot tool instead');
+  }
 }
 
 // PENDING TASKS
@@ -1287,11 +4399,51 @@ function showToast(msg){
 }
 
 // INITIALIZATION
+// NOTE: donutWomen/donutChildren/donutElders and caseCategoryChart are drawn
+// by dashboard-integration.js's loadDashboardData() with live data from
+// /api/overview on DOMContentLoaded. The Case Location map (initCaseLocationMap)
+// is triggered from the same place, using /api/case-locations + /api/case-links.
 window.addEventListener('DOMContentLoaded', ()=>{
   document.getElementById('loginTime').textContent = new Date().toLocaleString('en-IN', {dateStyle:'medium', timeStyle:'short'});
   setLang('hi');
-  initCharts();
 });
 </script>
+<script src="dashboard-integration.js"></script>
 </body>
 </html>
+"""
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_dashboard():
+    return HTML_TEMPLATE
+
+
+# sihfrontendtest.py never had a route for this, even though the HTML above
+# does <script src="dashboard-integration.js"></script>. Without this route
+# the browser's request for that file 404s, the script never loads, and
+# EVERYTHING it's responsible for (stat cards, Network Overview chart,
+# District Distribution chart, Top Suspects, Critical Bridges,
+# etc.) stays stuck at its blank/zero HTML default -- which is exactly what
+# the screenshot shows. api_server.py already did this correctly:
+@app.get("/dashboard-integration.js")
+def serve_dashboard_js():
+    js_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard-integration.js")
+    if not os.path.exists(js_path):
+        logger.error(
+            "dashboard-integration.js not found next to sihfrontendtest.py at %s. "
+            "The dashboard HTML references it but the file itself is missing.",
+            js_path,
+        )
+        return JSONResponse(
+            status_code=404,
+            content={"error": "dashboard-integration.js not found on server"},
+        )
+    return FileResponse(js_path, media_type="application/javascript")
+
+
+# ==========================================
+# 4. ENTRYPOINT EXECUTION
+# ==========================================
+
+if __name__ == "__main__":
+    uvicorn.run("sihfrontendtest:app", host="0.0.0.0", port=8000, reload=True)
