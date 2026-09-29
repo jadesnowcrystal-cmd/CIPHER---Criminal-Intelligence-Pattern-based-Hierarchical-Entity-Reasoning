@@ -103,6 +103,19 @@ from sihnetworkanalytics import run_network_analytics
 from sihintelligenceengine import run_full_intelligence_analysis
 from sihtimeline import render_timeline_page, render_network_intelligence_page
 
+# Multimedia Digital Forensic — shared foundation (file 1/5) + per-module
+# analyzers (files 2-5). All four modules (Chats, Video, Audio, Image) are now
+# wired to real analyzers via the shared foundation's run_analysis_and_render().
+from sihforensicanalysis import (
+    run_analysis_and_render,
+    get_or_create_fixture,
+    load_persisted_results,
+    render_result_summary,
+)
+from sihchatsanalysis import analyze_chat_file, generate_fixture_db, render_message_filter
+from sihvideoanalysis import analyze_video_file, generate_video_fixture
+from sihimageanalysis import analyze_image_file, generate_image_fixture
+
 # ---------------------------------------------------------------------------
 # SOP / Legal RAG assistant — UNCHANGED from the previous prototype. This is
 # intentionally left as-is ("keep it like that, I'll add the model"): the
@@ -779,6 +792,13 @@ if "analysis_uploads" not in st.session_state:
     # {"name", "size", "uploaded_at"} dicts. Session-only (in-memory) store
     # for files uploaded through each forensic tab's Analysis sub-tab.
     st.session_state["analysis_uploads"] = {}
+if "chats_analysis_last_result" not in st.session_state:
+    # Keyed by case_id -> most recent Chats Analysis result dict (the same
+    # shape run_analysis_and_render() returns/persists). Kept in session
+    # state so the keyword/date-range message filter below the "Run
+    # Analysis" button still has something to filter across Streamlit
+    # reruns, without re-parsing the evidence file each time.
+    st.session_state["chats_analysis_last_result"] = {}
 
 THEMES = {
     "dark": {
@@ -2234,17 +2254,409 @@ elif page == "Report Analysis":
                         st.markdown(f"- 📎 `{f['name']}` — {f['size']/1024:.1f} KB — uploaded {f['uploaded_at']}")
                 st.write("")
 
+            def _render_chats_analysis_module(case_id):
+                """Chats Analysis (Multimedia Digital Forensic > Analysis,
+                file 2/5) — the one module in this tab that's actually wired
+                up to a real analyzer (sihchatsanalysis.analyze_chat_file)
+                via the shared foundation's run_analysis_and_render()
+                helper. BASIC tier only: .db/.sqlite/.json/.xml. .crypt14 /
+                .crypt15 / .ufdr are accepted by the uploader but come back
+                as a clean 'needs HEAVY tier' parse_error, per
+                2_chats_analysis.md."""
+                extensions = ["db", "sqlite", "crypt14", "crypt15", "xml", "json", "ufdr"]
+                st.caption("Accepted file types: " + ", ".join(f".{e}" for e in extensions))
+                st.caption(
+                    "🟢 BASIC tier: .db / .sqlite / .json / .xml are parsed now. "
+                    ".crypt14, .crypt15 and .ufdr are HEAVY-tier formats not yet built — "
+                    "uploading one returns a clear message instead of a crash."
+                )
+
+                upload_key = f"upload_Multimedia Digital Forensic_Chats Analysis_{case_id}"
+                uploaded = st.file_uploader(
+                    "Upload chat evidence (WhatsApp/Telegram/SMS export)",
+                    type=extensions, key=upload_key, label_visibility="collapsed",
+                )
+                if uploaded is not None:
+                    store_key = f"{case_id}||Multimedia Digital Forensic||Chats Analysis"
+                    existing = st.session_state["analysis_uploads"].setdefault(store_key, [])
+                    if not any(f["name"] == uploaded.name and f["size"] == uploaded.size for f in existing):
+                        existing.append({
+                            "name": uploaded.name,
+                            "size": uploaded.size,
+                            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        })
+                    st.success(
+                        f"'{uploaded.name}' attached to this case. It now appears under this "
+                        f"tab's Reports sub-tab and in the Full Unified Investigation Report list below."
+                    )
+
+                bc1, bc2, bc3 = st.columns(3)
+                with bc1:
+                    run_clicked = st.button(
+                        "🔬 Run Analysis", key=f"run_analysis_chats_{case_id}",
+                        use_container_width=True, disabled=uploaded is None,
+                        help="Parse the uploaded chat file and extract phone numbers, people, and timestamps."
+                        if uploaded is not None else "Upload a chat file above first.",
+                    )
+                with bc2:
+                    sample_clicked = st.button(
+                        "🧪 Use Sample Evidence", key=f"run_sample_chats_{case_id}",
+                        use_container_width=True,
+                        help="Run analysis on a synthetic chat log generated from this case's own FIR data "
+                             "(informant/victim/accused names & numbers) — useful when no real evidence has "
+                             "been uploaded yet.",
+                    )
+                with bc3:
+                    st.button(
+                        "🤖 Connect to AI", key=f"connect_ai_chats_{case_id}",
+                        use_container_width=True, disabled=True,
+                        help="Under construction — AI-assisted review for this module isn't wired up yet.",
+                    )
+
+                result = None
+                if run_clicked and uploaded is not None:
+                    result = run_analysis_and_render(
+                        case_id=case_id, module_name="Chats Analysis", tier="basic",
+                        uploaded_file=uploaded, analyze_fn=analyze_chat_file,
+                        spinner_text="Parsing chat evidence…",
+                    )
+                elif sample_clicked:
+                    fixture = get_or_create_fixture(
+                        fir_no=case_id, module_name="Chats Analysis",
+                        extension="db", generator_fn=generate_fixture_db,
+                    )
+                    if fixture is None:
+                        st.warning(
+                            f"No FIR record found for '{case_id}' in {os.path.basename('complete_fir_dataset.csv')} "
+                            "— can't generate a case-matched sample. Register/select a real case first."
+                        )
+                    else:
+                        result = run_analysis_and_render(
+                            case_id=case_id, module_name="Chats Analysis", tier="basic",
+                            uploaded_file=fixture, analyze_fn=analyze_chat_file,
+                            spinner_text="Parsing synthetic sample chat log…",
+                        )
+
+                if result is not None:
+                    st.session_state["chats_analysis_last_result"][case_id] = result
+
+                # Keyword search + date-range filter over the most recent
+                # run's message table (persists across reruns via session
+                # state, so it isn't lost when the filter widgets themselves
+                # trigger a rerun).
+                last_result = st.session_state["chats_analysis_last_result"].get(case_id)
+                if last_result and last_result.get("status") == "ok":
+                    st.divider()
+                    render_message_filter(
+                        last_result.get("findings", {}),
+                        widget_key_prefix=f"chats_filter_{case_id}",
+                    )
+
+                past_runs = load_persisted_results(case_id, "Chats Analysis")
+                if past_runs:
+                    with st.expander(f"📜 Previous Chats Analysis runs for this case ({len(past_runs)})", expanded=False):
+                        for i, past in enumerate(reversed(past_runs), start=1):
+                            st.markdown(f"**Run {len(past_runs) - i + 1} — {past.get('uploaded_at', 'n/a')}**")
+                            render_result_summary(past)
+                            st.write("")
+
+            def _render_video_analysis_module(case_id):
+                """Video Analysis (Multimedia Digital Forensic > Analysis,
+                file 3/5) — wired to the real analyzer (sihvideoanalysis.analyze_video_file)
+                via the shared foundation's run_analysis_and_render()
+                helper. BASIC tier only: .mp4/.mov/.avi/.dav formats."""
+                extensions = ["mp4", "mov", "avi", "dav"]
+                st.caption("Accepted file types: " + ", ".join(f".{e}" for e in extensions))
+                st.caption(
+                    "🟢 BASIC tier: Extracts container metadata, detects scene cuts as a tampering "
+                    "heuristic, and generates frame thumbnails. Does NOT include PRNU fingerprinting, "
+                    "optical-flow analysis, or deepfake detection (those are HEAVY-tier features)."
+                )
+
+                upload_key = f"upload_Multimedia Digital Forensic_Video Analysis_{case_id}"
+                uploaded = st.file_uploader(
+                    "Upload video evidence (CCTV/surveillance footage)",
+                    type=extensions, key=upload_key, label_visibility="collapsed",
+                )
+                if uploaded is not None:
+                    store_key = f"{case_id}||Multimedia Digital Forensic||Video Analysis"
+                    existing = st.session_state["analysis_uploads"].setdefault(store_key, [])
+                    if not any(f["name"] == uploaded.name and f["size"] == uploaded.size for f in existing):
+                        existing.append({
+                            "name": uploaded.name,
+                            "size": uploaded.size,
+                            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        })
+                    st.success(
+                        f"'{uploaded.name}' attached to this case. It now appears under this "
+                        f"tab's Reports sub-tab and in the Full Unified Investigation Report list below."
+                    )
+
+                bc1, bc2, bc3 = st.columns(3)
+                with bc1:
+                    run_clicked = st.button(
+                        "🔬 Run Analysis", key=f"run_analysis_video_{case_id}",
+                        use_container_width=True, disabled=uploaded is None,
+                        help="Analyze the video: extract metadata, detect scene cuts, and generate frame thumbnails."
+                        if uploaded is not None else "Upload a video file above first.",
+                    )
+                with bc2:
+                    sample_clicked = st.button(
+                        "🧪 Use Sample Evidence", key=f"run_sample_video_{case_id}",
+                        use_container_width=True,
+                        help="Run analysis on a synthetic video generated for this case — useful when no real "
+                             "evidence has been uploaded yet. Shows how the analyzer handles scene cuts.",
+                    )
+                with bc3:
+                    st.button(
+                        "🤖 Connect to AI", key=f"connect_ai_video_{case_id}",
+                        use_container_width=True, disabled=True,
+                        help="Under construction — AI-assisted review for this module isn't wired up yet.",
+                    )
+
+                result = None
+                if run_clicked and uploaded is not None:
+                    result = run_analysis_and_render(
+                        case_id=case_id, module_name="Video Analysis", tier="basic",
+                        uploaded_file=uploaded, analyze_fn=analyze_video_file,
+                        spinner_text="Analyzing video file…",
+                    )
+                elif sample_clicked:
+                    fixture = get_or_create_fixture(
+                        fir_no=case_id, module_name="Video Analysis",
+                        extension="mp4", generator_fn=generate_video_fixture,
+                    )
+                    if fixture is None:
+                        st.warning(
+                            f"No FIR record found for '{case_id}' in {os.path.basename('complete_fir_dataset.csv')} "
+                            "— can't generate a case-matched sample. Register/select a real case first."
+                        )
+                    else:
+                        result = run_analysis_and_render(
+                            case_id=case_id, module_name="Video Analysis", tier="basic",
+                            uploaded_file=fixture, analyze_fn=analyze_video_file,
+                            spinner_text="Analyzing synthetic sample video…",
+                        )
+
+                if result is not None:
+                    st.session_state.setdefault("video_analysis_last_result", {})[case_id] = result
+
+                past_runs = load_persisted_results(case_id, "Video Analysis")
+                if past_runs:
+                    with st.expander(f"📜 Previous Video Analysis runs for this case ({len(past_runs)})", expanded=False):
+                        for i, past in enumerate(reversed(past_runs), start=1):
+                            st.markdown(f"**Run {len(past_runs) - i + 1} — {past.get('uploaded_at', 'n/a')}**")
+                            render_result_summary(past)
+                            st.write("")
+
+            def _render_audio_analysis_module(case_id):
+                """Audio Analysis (Multimedia Digital Forensic > Analysis,
+                file 4/5) — wired to the real analyzer (sih_audio_analysis.analyze_audio_basic)
+                via the shared foundation's run_analysis_and_render()
+                helper. BASIC tier only: .wav/.mp3/.opus/.m4a/.aac/.amr/.flac formats."""
+                from sih_audio_analysis import analyze_audio_basic
+
+                extensions = ["wav", "mp3", "opus", "m4a", "aac", "amr", "flac"]
+                st.caption("Accepted file types: " + ", ".join(f".{e}" for e in extensions))
+                st.caption(
+                    "🟢 BASIC tier: Extracts audio metadata (duration, sample rate, channels), "
+                    "detects speech vs. silence segments via energy thresholds, generates a mel-scale "
+                    "spectrogram visualization, and computes MFCC feature statistics. Does NOT include "
+                    "speaker diarization, speaker verification, or forensic voice comparison (those are "
+                    "HEAVY-tier features requiring explicit legal disclaimer)."
+                )
+
+                upload_key = f"upload_Multimedia Digital Forensic_Audio Analysis_{case_id}"
+                uploaded = st.file_uploader(
+                    "Upload audio evidence (call recording, ambient audio, etc.)",
+                    type=extensions, key=upload_key, label_visibility="collapsed",
+                )
+                if uploaded is not None:
+                    store_key = f"{case_id}||Multimedia Digital Forensic||Audio Analysis"
+                    existing = st.session_state["analysis_uploads"].setdefault(store_key, [])
+                    if not any(f["name"] == uploaded.name and f["size"] == uploaded.size for f in existing):
+                        existing.append({
+                            "name": uploaded.name,
+                            "size": uploaded.size,
+                            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        })
+                    st.success(
+                        f"'{uploaded.name}' attached to this case. It now appears under this "
+                        f"tab's Reports sub-tab and in the Full Unified Investigation Report list below."
+                    )
+
+                ac1, ac2, ac3 = st.columns(3)
+                with ac1:
+                    run_clicked = st.button(
+                        "🔬 Run Analysis", key=f"run_analysis_audio_{case_id}",
+                        use_container_width=True, disabled=uploaded is None,
+                        help="Analyze the audio: extract metadata, detect speech segments, "
+                             "generate spectrogram, and compute MFCC statistics."
+                        if uploaded is not None else "Upload an audio file above first.",
+                    )
+                with ac2:
+                    sample_clicked = st.button(
+                        "🧪 Use Sample Evidence", key=f"run_sample_audio_{case_id}",
+                        use_container_width=True,
+                        help="Run analysis on a synthetic audio file generated for this case — "
+                             "useful when no real evidence has been uploaded yet. Shows how the "
+                             "analyzer handles mixed content (silence + speech-like tones).",
+                    )
+                with ac3:
+                    st.button(
+                        "🤖 Connect to AI", key=f"connect_ai_audio_{case_id}",
+                        use_container_width=True, disabled=True,
+                        help="Under construction — AI-assisted review for this module isn't wired up yet.",
+                    )
+
+                result = None
+                if run_clicked and uploaded is not None:
+                    result = run_analysis_and_render(
+                        case_id=case_id, module_name="Audio Analysis", tier="basic",
+                        uploaded_file=uploaded, analyze_fn=analyze_audio_basic,
+                        spinner_text="Analyzing audio file…",
+                    )
+                elif sample_clicked:
+                    # Load the pre-generated synthetic test audio
+                    fixture_path = f"sample_evidence/FIR/2026/0001/audio/test.wav"
+                    if not os.path.exists(fixture_path):
+                        st.warning(
+                            f"Sample audio file not found at '{fixture_path}'. "
+                            "Run generate_test_audio.py first to create the synthetic fixture."
+                        )
+                    else:
+                        from sihforensicanalysis import _FixtureFile
+                        fixture = _FixtureFile(fixture_path)
+                        result = run_analysis_and_render(
+                            case_id=case_id, module_name="Audio Analysis", tier="basic",
+                            uploaded_file=fixture, analyze_fn=analyze_audio_basic,
+                            spinner_text="Analyzing synthetic sample audio…",
+                        )
+
+                if result is not None:
+                    st.session_state.setdefault("audio_analysis_last_result", {})[case_id] = result
+
+                past_runs = load_persisted_results(case_id, "Audio Analysis")
+                if past_runs:
+                    with st.expander(f"📜 Previous Audio Analysis runs for this case ({len(past_runs)})", expanded=False):
+                        for i, past in enumerate(reversed(past_runs), start=1):
+                            st.markdown(f"**Run {len(past_runs) - i + 1} — {past.get('uploaded_at', 'n/a')}**")
+                            render_result_summary(past)
+                            st.write("")
+
+            def _render_image_analysis_module(case_id):
+                """Image Analysis (Multimedia Digital Forensic > Analysis,
+                file 5/5) — wired to the real analyzer (sihimageanalysis.analyze_image_file)
+                via the shared foundation's run_analysis_and_render()
+                helper. BASIC tier only: .jpg/.jpeg/.png/.heic/.dng/.raw/.cr2/.nef formats."""
+
+                extensions = ["jpg", "jpeg", "png", "heic", "dng", "raw", "cr2", "nef"]
+                st.caption("Accepted file types: " + ", ".join(f".{e}" for e in extensions))
+                st.caption(
+                    "🟢 BASIC tier: Extracts EXIF metadata (GPS coordinates, capture timestamp, "
+                    "camera make/model, software tag), detects software-editing indicators, and "
+                    "performs Error Level Analysis (ELA) on JPEG files to highlight potential "
+                    "editing regions. ELA is not applicable to PNG/HEIC/RAW formats. Does NOT include "
+                    "PRNU sensor-fingerprint matching or DCT compression-variance analysis (those are "
+                    "HEAVY-tier features)."
+                )
+
+                upload_key = f"upload_Multimedia Digital Forensic_Image Analysis_{case_id}"
+                uploaded = st.file_uploader(
+                    "Upload image evidence (photo, screenshot, etc.)",
+                    type=extensions, key=upload_key, label_visibility="collapsed",
+                )
+                if uploaded is not None:
+                    store_key = f"{case_id}||Multimedia Digital Forensic||Image Analysis"
+                    existing = st.session_state["analysis_uploads"].setdefault(store_key, [])
+                    if not any(f["name"] == uploaded.name and f["size"] == uploaded.size for f in existing):
+                        existing.append({
+                            "name": uploaded.name,
+                            "size": uploaded.size,
+                            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        })
+                    st.success(
+                        f"'{uploaded.name}' attached to this case. It now appears under this "
+                        f"tab's Reports sub-tab and in the Full Unified Investigation Report list below."
+                    )
+
+                ic1, ic2, ic3 = st.columns(3)
+                with ic1:
+                    run_clicked = st.button(
+                        "🔬 Run Analysis", key=f"run_analysis_image_{case_id}",
+                        use_container_width=True, disabled=uploaded is None,
+                        help="Analyze the image: extract EXIF metadata, check for editing indicators, "
+                             "and perform ELA (JPEG only)."
+                        if uploaded is not None else "Upload an image file above first.",
+                    )
+                with ic2:
+                    sample_clicked = st.button(
+                        "🧪 Use Sample Evidence", key=f"run_sample_image_{case_id}",
+                        use_container_width=True,
+                        help="Run analysis on a synthetic image generated for this case — "
+                             "useful when no real evidence has been uploaded yet.",
+                    )
+                with ic3:
+                    st.button(
+                        "🤖 Connect to AI", key=f"connect_ai_image_{case_id}",
+                        use_container_width=True, disabled=True,
+                        help="Under construction — AI-assisted review for this module isn't wired up yet.",
+                    )
+
+                result = None
+                if run_clicked and uploaded is not None:
+                    result = run_analysis_and_render(
+                        case_id=case_id, module_name="Image Analysis", tier="basic",
+                        uploaded_file=uploaded, analyze_fn=analyze_image_file,
+                        spinner_text="Analyzing image file…",
+                    )
+                elif sample_clicked:
+                    # Load or generate synthetic test image
+                    fixture = get_or_create_fixture(case_id, "image", generate_image_fixture)
+                    result = run_analysis_and_render(
+                        case_id=case_id, module_name="Image Analysis", tier="basic",
+                        uploaded_file=fixture, analyze_fn=analyze_image_file,
+                        spinner_text="Analyzing synthetic sample image…",
+                    )
+
+                if result is not None:
+                    st.session_state.setdefault("image_analysis_last_result", {})[case_id] = result
+
+                past_runs = load_persisted_results(case_id, "Image Analysis")
+                if past_runs:
+                    with st.expander(f"📜 Previous Image Analysis runs for this case ({len(past_runs)})", expanded=False):
+                        for i, past in enumerate(reversed(past_runs), start=1):
+                            st.markdown(f"**Run {len(past_runs) - i + 1} — {past.get('uploaded_at', 'n/a')}**")
+                            render_result_summary(past)
+                            st.write("")
+
             def _render_analysis_section(tab_name, case_id):
                 """Renders the Analysis sub-tab for one forensic tab: an
                 uploader per module (accepted types from ANALYSIS_MODULES),
                 plus disabled 'Analysis' and 'Connect to AI' buttons, each
-                with an (i) tooltip explaining they're under construction."""
+                with an (i) tooltip explaining they're under construction —
+                except Chats Analysis, Video Analysis, Audio Analysis, and Image Analysis under Multimedia Digital Forensic,
+                which are wired to real analyzers (see
+                _render_chats_analysis_module, _render_video_analysis_module, _render_audio_analysis_module, and _render_image_analysis_module)."""
                 modules = ANALYSIS_MODULES.get(tab_name, [])
                 if not modules:
                     st.info("No analysis modules configured for this tab yet.")
                     return
                 for module_name, icon, extensions in modules:
                     with st.expander(f"{icon} {module_name}", expanded=False):
+                        if tab_name == "Multimedia Digital Forensic" and module_name == "Chats Analysis":
+                            _render_chats_analysis_module(case_id)
+                            continue
+                        if tab_name == "Multimedia Digital Forensic" and module_name == "Video Analysis":
+                            _render_video_analysis_module(case_id)
+                            continue
+                        if tab_name == "Multimedia Digital Forensic" and module_name == "Audio Analysis":
+                            _render_audio_analysis_module(case_id)
+                            continue
+                        if tab_name == "Multimedia Digital Forensic" and module_name == "Image Analysis":
+                            _render_image_analysis_module(case_id)
+                            continue
+
                         st.caption(
                             "Accepted file types: " + ", ".join(f".{e}" for e in extensions)
                         )
